@@ -1,0 +1,13 @@
+streamlit
+huggingface_hub
+pandas
+faiss-cpu
+sentence-transformers
+requests
+langchain
+langchain-community
+langchain-huggingface
+pypdf
+ollama
+kagglehub
+torch

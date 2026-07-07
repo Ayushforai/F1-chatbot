@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+botenv/
+.env
+
+# OS / IDE
+.DS_Store
+.idea/
+*.swp
+
+# Generated artifacts (rebuild with pdf_processor.py)
+vector_store/
+
+# Large optional datasets (download locally via setup_historical_data.py)
+data/archive/
+
+# Model caches
+.cache/
+*.faiss
