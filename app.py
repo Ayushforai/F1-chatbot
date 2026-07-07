@@ -90,19 +90,15 @@ def main():
                 context = f"Live telemetry data from vehicle streams: {str(telemetry_data)}"
 
         elif category == "historical":
-            # Historical CSV Database Path
-            print(" [Extractor] Processing historical query via Qwen...")
-            params = extract_telemetry_params(user_query, history=conversation_history)
-            print(f" [Debug] Qwen Extracted JSON: {params}")
+            index_path = os.path.join(vector_store_root, category)
+            if not os.path.exists(index_path):
+                print(f" [Error] Historical index not found at '{index_path}'. Run historical_processor.py first.\n")
+                continue
 
-            year = params.get("year") or 2024
-            country = params.get("country")
-            driver_name = params.get("driver_name") or ""
-
-            print(f" [CSV Lookup] Searching historical records: {driver_name} | {year} | {country}...")
-            from utils.historical_db import get_historical_driver_info
-            historical_data = get_historical_driver_info(year, driver_name, country)
-            context = f"Historical Race Record: {str(historical_data)}"
+            print(" [RAG] Searching historical vector store...")
+            db = FAISS.load_local(index_path, embeddings, allow_dangerous_deserialization=True)
+            docs = db.similarity_search(user_query, k=5)
+            context = "\n\n".join([doc.page_content for doc in docs])
 
         else:
             # Document Retrieval Path (Unstructured FAISS RAG)
