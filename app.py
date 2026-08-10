@@ -1,10 +1,8 @@
-import os
 import ollama
-import torch
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_community.vectorstores import FAISS
 from utils.router import route_query, extract_telemetry_params
 from utils.f1_api import get_driver_telemetry
+from utils.vector_store import search as vector_search
+from utils.historical_db import get_historical_driver_info
 
 MODEL_NAME = 'qwen2.5:7b-instruct-q8_0'
 
@@ -30,16 +28,22 @@ def generate_f1_response(user_query: str, context_text: str) -> str:
     except Exception as e:
         return f"Telemetry stream interrupted. Error: {e}"
 
+def _historical_context(user_query: str, history: list[dict]) -> str:
+    try:
+        chunks = vector_search("historical", user_query, k=5)
+        return "\n\n".join(chunks)
+    except Exception as e:
+        print(f" [RAG Warning] Vector search failed ({e}). Falling back to CSV lookup...")
+        params = extract_telemetry_params(user_query, history=history)
+        year = params.get("year") or 2024
+        country = params.get("country")
+        driver_name = params.get("driver_name") or ""
+        historical_data = get_historical_driver_info(year, driver_name, country)
+        return f"Historical Race Record: {historical_data}"
+
+
 def main():
     print("Initializing Hybrid F1 Race Engineer Pipeline...")
-    device = "mps" if torch.backends.mps.is_available() else "cpu"
-    embeddings = HuggingFaceEmbeddings(
-        model_name="BAAI/bge-base-en-v1.5",
-        model_kwargs={"device": device},
-        encode_kwargs={"normalize_embeddings": True},
-    )
-    vector_store_root = "./vector_store"
-
     print(f"\nPit Wall Active [Model: {MODEL_NAME}]. Type 'exit' to close telemetry link.\n")
 
     conversation_history = []
@@ -90,26 +94,17 @@ def main():
                 context = f"Live telemetry data from vehicle streams: {str(telemetry_data)}"
 
         elif category == "historical":
-            index_path = os.path.join(vector_store_root, category)
-            if not os.path.exists(index_path):
-                print(f" [Error] Historical index not found at '{index_path}'. Run historical_processor.py first.\n")
-                continue
-
             print(" [RAG] Searching historical vector store...")
-            db = FAISS.load_local(index_path, embeddings, allow_dangerous_deserialization=True)
-            docs = db.similarity_search(user_query, k=5)
-            context = "\n\n".join([doc.page_content for doc in docs])
+            context = _historical_context(user_query, conversation_history)
 
         else:
-            # Document Retrieval Path (Unstructured FAISS RAG)
-            index_path = os.path.join(vector_store_root, category)
-            if not os.path.exists(index_path):
-                print(f" [Error] The index directory '{index_path}' hasn't been compiled yet.\n")
+            print(f" [RAG] Searching {category} vector store...")
+            try:
+                chunks = vector_search(category, user_query, k=3)
+                context = "\n\n".join(chunks)
+            except FileNotFoundError as e:
+                print(f" [Error] {e}\n")
                 continue
-
-            db = FAISS.load_local(index_path, embeddings, allow_dangerous_deserialization=True)
-            docs = db.similarity_search(user_query, k=3)
-            context = "\n\n".join([doc.page_content for doc in docs])
 
         # 3. Text Generation
         answer = generate_f1_response(user_query, context)

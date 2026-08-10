@@ -1,9 +1,8 @@
 import os
-import torch
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
+from utils.embeddings import get_embeddings
 
 # Mapping categories to keywords in your filenames
 CATEGORIES = {
@@ -21,14 +20,8 @@ def process_rulebooks():
         print(f"Error: Add your FIA PDFs into a folder named '{data_dir}' first.")
         return
 
-    # Initialize local embedding model optimized for technical/regulatory retrieval
     print("Loading embedding model...")
-    device = "mps" if torch.backends.mps.is_available() else "cpu"
-    embeddings = HuggingFaceEmbeddings(
-        model_name="BAAI/bge-base-en-v1.5",
-        model_kwargs={"device": device},
-        encode_kwargs={"normalize_embeddings": True},
-    )
+    embeddings = get_embeddings()
     
     # Split text clean by paragraph boundaries without losing structural context
     text_splitter = RecursiveCharacterTextSplitter(

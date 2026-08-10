@@ -1,9 +1,8 @@
 import os
-import torch
 import pandas as pd
 from langchain_core.documents import Document
-from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
+from utils.embeddings import get_embeddings
 
 DATA_DIR = "./data/historical_csvs"
 OUTPUT_DIR = "./vector_store/historical"
@@ -24,33 +23,45 @@ def build_historical_documents() -> list[Document]:
 
     merged = (
         results.merge(drivers[["driverId", "forename", "surname"]], on="driverId")
-        .merge(constructors[["constructorId", "name"]].rename(columns={"name": "constructor_name"}), on="constructorId")
-        .merge(races[["raceId", "year", "round", "name"]].rename(columns={"name": "race_name"}), on="raceId")
+        .merge(
+            constructors[["constructorId", "name"]].rename(columns={"name": "constructor_name"}),
+            on="constructorId",
+        )
+        .merge(
+            races[["raceId", "year", "round", "name"]].rename(columns={"name": "race_name"}),
+            on="raceId",
+        )
+        .sort_values(["year", "round", "positionOrder"])
     )
 
     docs: list[Document] = []
 
-    for _, row in merged.iterrows():
+    # One document per race keeps the FAISS index small and retrieval accurate.
+    for race_id, race_rows in merged.groupby("raceId", sort=False):
+        race_rows = race_rows.sort_values("positionOrder")
+        first = race_rows.iloc[0]
+        lines = []
+        for _, row in race_rows.head(10).iterrows():
+            lines.append(
+                f"P{_clean(row['positionText'])}: {row['forename']} {row['surname']} "
+                f"({row['constructor_name']}) — {_clean(row['time'])}, {_clean(row['points'])} pts"
+            )
+
         text = (
-            f"In the {row['year']} {row['race_name']} (round {row['round']}), "
-            f"{row['forename']} {row['surname']} drove for {row['constructor_name']}. "
-            f"He finished in position {_clean(row['positionText'])} starting from grid {_clean(row['grid'])}. "
-            f"Race time or gap: {_clean(row['time'])}. Points scored: {_clean(row['points'])}. "
-            f"Fastest lap: {_clean(row['fastestLapTime'])}."
+            f"{first['year']} {first['race_name']} (Round {first['round']}) race results:\n"
+            + "\n".join(lines)
         )
         docs.append(
             Document(
                 page_content=text,
                 metadata={
-                    "year": int(row["year"]),
-                    "race": row["race_name"],
-                    "driver": f"{row['forename']} {row['surname']}",
-                    "team": row["constructor_name"],
+                    "year": int(first["year"]),
+                    "race": first["race_name"],
+                    "round": int(first["round"]),
                 },
             )
         )
 
-    # Season championship snapshots from the final round of each year
     last_races = races.loc[races.groupby("year")["round"].idxmax()]
     for _, race in last_races.iterrows():
         season_standings = (
@@ -89,18 +100,13 @@ def build_historical_index():
         return
 
     print("Loading embedding model...")
-    device = "mps" if torch.backends.mps.is_available() else "cpu"
-    embeddings = HuggingFaceEmbeddings(
-        model_name="BAAI/bge-base-en-v1.5",
-        model_kwargs={"device": device},
-        encode_kwargs={"normalize_embeddings": True},
-    )
+    embeddings = get_embeddings()
 
     print("Building documents from historical CSVs...")
     documents = build_historical_documents()
     print(f"Generated {len(documents)} historical documents.")
 
-    print("Generating embeddings and FAISS index (this may take a few minutes)...")
+    print("Generating embeddings and FAISS index...")
     vector_db = FAISS.from_documents(documents, embeddings)
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
