@@ -1,10 +1,80 @@
 import ollama
 from utils.router import route_query, extract_telemetry_params
-from utils.f1_api import get_driver_telemetry
+from utils.f1_api import (
+    LIVE_DATA_UNAVAILABLE_MESSAGE,
+    SESSION_NOT_HELD_MESSAGE,
+    get_driver_telemetry,
+    get_fastest_lap_of_race,
+    get_historical_lap,
+)
 from utils.vector_store import search as vector_search
 from utils.historical_db import get_historical_driver_info
+from utils.venues import resolve_venue
 
 MODEL_NAME = 'qwen2.5:7b-instruct-q8_0'
+
+MISSING_DRIVER_MESSAGE = (
+    "Which driver are you referring to? Please specify a name "
+    "(for example Hamilton or Verstappen) or a car number "
+    "(for example #44 or #1) so I can look up the right data."
+)
+
+
+def _has_driver(driver) -> bool:
+    """True when the extractor produced a usable driver number."""
+    return driver is not None and driver != ""
+
+
+def query_requires_driver(q_type: str | None, country) -> bool:
+    """Overall fastest-lap of a named race does not need a driver; live/lap lookups do."""
+    return not (q_type == "fastest_lap" and country)
+
+
+def resolve_quantitative_query(params: dict, user_query: str = "") -> dict:
+    """Build a quantitative reply.
+
+    Returns ``{"kind": "clarify", "message": str}`` when a driver or GP is
+    required but missing, ``{"kind": "error", "message": str}`` for known
+    failures, or ``{"kind": "context", "context": str}`` for the LLM.
+    """
+    q_type = params.get("query_type")
+    driver = params.get("driver_number")
+    year = params.get("year") or 2026
+    country = params.get("country")
+    location = params.get("location")
+    lap = params.get("lap_number")
+
+    is_race_lookup = q_type in ("fastest_lap", "specific_lap") or lap is not None
+    if is_race_lookup:
+        venue = resolve_venue(country=country, location=location, query=user_query)
+        if venue["kind"] == "clarify":
+            return {"kind": "clarify", "message": venue["message"]}
+        if venue["kind"] == "ok":
+            country = venue["country"]
+            location = venue["location"]
+
+    if query_requires_driver(q_type, country) and not _has_driver(driver):
+        return {"kind": "clarify", "message": MISSING_DRIVER_MESSAGE}
+
+    if q_type == "fastest_lap" and country:
+        print(f" [API Connection] Scanning {year} {country} archives for the fastest lap...")
+        telemetry_data = get_fastest_lap_of_race(year, country, driver, location=location)
+        if telemetry_data == SESSION_NOT_HELD_MESSAGE:
+            return {"kind": "error", "message": SESSION_NOT_HELD_MESSAGE}
+        return {"kind": "context", "context": f"Historical Fastest Lap Record: {str(telemetry_data)}"}
+
+    if (q_type == "specific_lap" or lap is not None) and country:
+        print(f" [API Connection] Accessing historical archives for {country} {year}, Lap {lap}...")
+        telemetry_data = get_historical_lap(year, country, driver, lap, location=location)
+        if telemetry_data == SESSION_NOT_HELD_MESSAGE:
+            return {"kind": "error", "message": SESSION_NOT_HELD_MESSAGE}
+        return {"kind": "context", "context": f"Historical Lap Data Packet: {str(telemetry_data)}"}
+
+    print(f" [API Connection] Querying live OpenF1 data stream for Driver #{driver}...")
+    telemetry_data = get_driver_telemetry(driver_number=driver)
+    if telemetry_data == LIVE_DATA_UNAVAILABLE_MESSAGE:
+        return {"kind": "error", "message": LIVE_DATA_UNAVAILABLE_MESSAGE}
+    return {"kind": "context", "context": f"Live telemetry data from vehicle streams: {str(telemetry_data)}"}
 
 def generate_f1_response(user_query: str, context_text: str) -> str:
     system_prompt = (
@@ -35,10 +105,21 @@ def _historical_context(user_query: str, history: list[dict]) -> str:
     except Exception as e:
         print(f" [RAG Warning] Vector search failed ({e}). Falling back to CSV lookup...")
         params = extract_telemetry_params(user_query, history=history)
+        venue = resolve_venue(
+            country=params.get("country"),
+            location=params.get("location"),
+            query=user_query,
+        )
         year = params.get("year") or 2024
         country = params.get("country")
+        location = params.get("location")
+        if venue["kind"] == "ok":
+            country = venue["country"]
+            location = venue["location"]
+        elif venue["kind"] == "clarify":
+            return venue["message"]
         driver_name = params.get("driver_name") or ""
-        historical_data = get_historical_driver_info(year, driver_name, country)
+        historical_data = get_historical_driver_info(year, driver_name, country, location=location)
         return f"Historical Race Record: {historical_data}"
 
 
@@ -65,35 +146,24 @@ def main():
             params = extract_telemetry_params(user_query, history=conversation_history)
             
             print(f" [Debug] Qwen Extracted JSON: {params}")
-            
-            # Extract parameters safely with fallbacks
-            q_type = params.get("query_type")
-            driver = params.get("driver_number") # Remains None if no driver is extracted
-            year = params.get("year") or 2026
-            country = params.get("country")
-            lap = params.get("lap_number")
-            
-            if q_type == "fastest_lap" and country:
-                print(f" [API Connection] Scanning {year} {country} archives for the fastest lap...")
-                from utils.f1_api import get_fastest_lap_of_race
-                telemetry_data = get_fastest_lap_of_race(year, country, driver) 
-                context = f"Historical Fastest Lap Record: {str(telemetry_data)}"
-                
-            elif (q_type == "specific_lap" or lap is not None) and country:
-                print(f" [API Connection] Accessing historical archives for {country} {year}, Lap {lap}...")
-                from utils.f1_api import get_historical_lap
-                d_num = driver or 44 
-                telemetry_data = get_historical_lap(year, country, d_num, lap)
-                context = f"Historical Lap Data Packet: {str(telemetry_data)}"
-                
-            else:
-                d_num = driver or 44 
-                print(f" [API Connection] Querying live OpenF1 data stream for Driver #{d_num}...")
-                from utils.f1_api import get_driver_telemetry
-                telemetry_data = get_driver_telemetry(driver_number=d_num)
-                context = f"Live telemetry data from vehicle streams: {str(telemetry_data)}"
+
+            result = resolve_quantitative_query(params, user_query=user_query)
+            if result["kind"] in ("clarify", "error"):
+                print(f"\nResponse:\n{result['message']}\n")
+                print("-" * 50)
+                conversation_history.append({"query": user_query, "category": category})
+                conversation_history = conversation_history[-5:]
+                continue
+            context = result["context"]
 
         elif category == "historical":
+            venue = resolve_venue(query=user_query)
+            if venue["kind"] == "clarify":
+                print(f"\nResponse:\n{venue['message']}\n")
+                print("-" * 50)
+                conversation_history.append({"query": user_query, "category": category})
+                conversation_history = conversation_history[-5:]
+                continue
             print(" [RAG] Searching historical vector store...")
             context = _historical_context(user_query, conversation_history)
 

@@ -1,34 +1,9 @@
 import pandas as pd
 import os
 
-DATA_DIR = "./data/historical_csvs"
+from utils.venues import csv_race_keyword
 
-# Maps LLM-extracted country strings to the keyword found in race names in the CSV
-COUNTRY_TO_GP_KEYWORD = {
-    "Great Britain": "British",
-    "Spain": "Spanish",
-    "Italy": "Italian",
-    "Belgium": "Belgian",
-    "Hungary": "Hungarian",
-    "Germany": "German",
-    "France": "French",
-    "Netherlands": "Dutch",
-    "Brazil": "Brazilian",
-    "Mexico": "Mexican",
-    "Saudi Arabia": "Saudi",
-    "United States": "United States",
-    "Australia": "Australian",
-    "Canada": "Canadian",
-    "Austria": "Austrian",
-    "China": "Chinese",
-    "Bahrain": "Bahrain",
-    "Qatar": "Qatar",
-    "Singapore": "Singapore",
-    "Japan": "Japanese",
-    "Monaco": "Monaco",
-    "Azerbaijan": "Azerbaijan",
-    "Abu Dhabi": "Abu Dhabi",
-}
+DATA_DIR = "./data/historical_csvs"
 
 # Load ALL the CSVs into memory when the app starts
 try:
@@ -40,12 +15,12 @@ except FileNotFoundError:
     print("Warning: Historical CSVs not found. Please run setup_historical_data.py first.")
 
 
-def get_race_results(year: int, country: str, top_n: int = 10) -> dict | str:
+def get_race_results(year: int, country: str, top_n: int = 10, location: str | None = None) -> dict | str:
     """Return the full top-N finishers for a race, with team, gap, and fastest lap data."""
     try:
         races_yr = races_df[races_df['year'] == year]
         if country:
-            search_keyword = COUNTRY_TO_GP_KEYWORD.get(country, country)
+            search_keyword = csv_race_keyword(country, location)
             races_yr = races_yr[races_yr['name'].str.contains(search_keyword, case=False, na=False)]
 
         if races_yr.empty:
@@ -79,11 +54,11 @@ def get_race_results(year: int, country: str, top_n: int = 10) -> dict | str:
         return f"Historical Database Error: {str(e)}"
 
 
-def get_historical_driver_info(year: int, driver_ref: str, country: str = None):
+def get_historical_driver_info(year: int, driver_ref: str, country: str = None, location: str | None = None):
     """Return race result for a specific driver plus full top-10 context for that race."""
     try:
         # Always fetch the full race results for rich context
-        race_data = get_race_results(year, country)
+        race_data = get_race_results(year, country, location=location)
         if isinstance(race_data, str):
             return race_data  # error string
 
@@ -101,7 +76,7 @@ def get_historical_driver_info(year: int, driver_ref: str, country: str = None):
 
             races_yr = races_df[races_df['year'] == year]
             if country:
-                search_keyword = COUNTRY_TO_GP_KEYWORD.get(country, country)
+                search_keyword = csv_race_keyword(country, location)
                 races_yr = races_yr[races_yr['name'].str.contains(search_keyword, case=False, na=False)]
 
             if not races_yr.empty:

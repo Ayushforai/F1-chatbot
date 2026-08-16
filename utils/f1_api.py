@@ -1,6 +1,17 @@
+from datetime import datetime, timedelta, timezone
+
 import requests
 
+from utils.venues import MULTI_GP_COUNTRIES, multi_gp_clarification
+
 BASE_URL = "https://api.openf1.org/v1"
+
+# OpenF1 treats data as live from 30 minutes before a session starts until 30 minutes after it ends.
+LIVE_WINDOW_PADDING = timedelta(minutes=30)
+LIVE_DATA_UNAVAILABLE_MESSAGE = (
+    "This bot cannot print live F1 data as there is no live session going currently."
+)
+SESSION_NOT_HELD_MESSAGE = "The session is yet to be conducted."
 
 def format_lap_time(seconds):
     """Converts raw seconds into a standard F1 MM:SS.ms format."""
@@ -17,73 +28,153 @@ def format_lap_time(seconds):
         return str(seconds)
 
 
-def get_driver_telemetry(driver_number: int, session_key: str = "latest"):
-    """Fetch the latest speed, RPM, and gear telemetry for a specific driver."""
+def _parse_iso(dt_str: str | None) -> datetime | None:
+    if not dt_str:
+        return None
     try:
-        if session_key == "latest":
-            session_res = requests.get(f"{BASE_URL}/sessions?location=Silverstone&year=2024")
-            if session_res.status_code == 200 and session_res.json():
-                session_key = session_res.json()[-1]["session_key"]
-            else:
-                session_key = "9565"
-
-        url = f"{BASE_URL}/car_data?driver_number={driver_number}&session_key={session_key}"
-        response = requests.get(url)
-
-        if response.status_code == 200:
-            data = response.json()
-            if not data:
-                return f"No telemetry found for Driver {driver_number} in session {session_key}."
-
-            latest_metrics = data[-1]
-            return {
-                "driver_number": driver_number,
-                "speed": latest_metrics.get("speed"),
-                "rpm": latest_metrics.get("rpm"),
-                "gear": latest_metrics.get("gear"),
-                "drs": latest_metrics.get("drs"),
-                "date": latest_metrics.get("date"),
-            }
-
-        return f"API Error: Unable to fetch car data (Status Code: {response.status_code})"
-    except Exception as e:
-        return f"Failed to reach telemetry tower: {str(e)}"
+        dt = datetime.fromisoformat(str(dt_str).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except (ValueError, TypeError):
+        return None
 
 
-def get_session_info(country: str, year: int = 2024):
-    """Fetch scheduling data and session IDs for a specific Grand Prix weekend."""
+def session_is_live(session: dict, now: datetime | None = None) -> bool:
+    """True when `now` falls in OpenF1's live window for this session."""
+    now = now or datetime.now(timezone.utc)
+    start = _parse_iso(session.get("date_start"))
+    end = _parse_iso(session.get("date_end"))
+    if start is None or end is None:
+        return False
+    return (start - LIVE_WINDOW_PADDING) <= now <= (end + LIVE_WINDOW_PADDING)
+
+
+def get_driver_telemetry(driver_number: int, now: datetime | None = None):
+    """Fetch live speed, RPM, and gear from OpenF1 when a session is actually live.
+
+    Does not fall back to an archive snapshot. If no live session (or the API
+    cannot serve live car data), returns LIVE_DATA_UNAVAILABLE_MESSAGE.
+    """
     try:
-        url = f"{BASE_URL}/sessions?country_name={country}&year={year}"
-        response = requests.get(url)
-        if response.status_code == 200 and response.json():
-            session = response.json()[0]
-            return {
-                "circuit": session.get("circuit_short_name"),
-                "date_start": session.get("date_start"),
-                "session_name": session.get("session_name"),
-            }
-        return "No session match found for those parameters."
+        session_res = requests.get(f"{BASE_URL}/sessions?session_key=latest")
+        if session_res.status_code != 200:
+            return LIVE_DATA_UNAVAILABLE_MESSAGE
+
+        sessions = session_res.json()
+        if not sessions:
+            return LIVE_DATA_UNAVAILABLE_MESSAGE
+
+        latest_session = sessions[-1] if isinstance(sessions, list) else sessions
+        if not session_is_live(latest_session, now=now):
+            return LIVE_DATA_UNAVAILABLE_MESSAGE
+
+        car_res = requests.get(
+            f"{BASE_URL}/car_data?driver_number={driver_number}&session_key=latest"
+        )
+        if car_res.status_code != 200:
+            return LIVE_DATA_UNAVAILABLE_MESSAGE
+
+        data = car_res.json()
+        if not data:
+            return LIVE_DATA_UNAVAILABLE_MESSAGE
+
+        latest_metrics = data[-1]
+        return {
+            "driver_number": driver_number,
+            "speed": latest_metrics.get("speed"),
+            "rpm": latest_metrics.get("rpm"),
+            "gear": latest_metrics.get("gear"),
+            "drs": latest_metrics.get("drs"),
+            "date": latest_metrics.get("date"),
+        }
+    except Exception:
+        return LIVE_DATA_UNAVAILABLE_MESSAGE
+
+
+def _payload_list(payload) -> list:
+    return payload if isinstance(payload, list) else []
+
+
+def fetch_race_session(
+    year: int,
+    country: str,
+    location: str | None = None,
+    now: datetime | None = None,
+):
+    """Return the OpenF1 Race session dict, or an error string."""
+    now = now or datetime.now(timezone.utc)
+    try:
+        res = requests.get(
+            f"{BASE_URL}/sessions",
+            params={"country_name": country, "year": year, "session_name": "Race"},
+        )
     except Exception as e:
-        return f"Error retrieving session keys: {str(e)}"
+        return f"Historical Archive Error: {str(e)}"
+
+    if res.status_code == 429:
+        return "OpenF1 rate limit exceeded. Please try again in a minute."
+
+    sessions = _payload_list(res.json()) if res.status_code == 200 else []
+
+    if location:
+        loc = location.lower()
+        sessions = [
+            session
+            for session in sessions
+            if loc in str(session.get("location") or "").lower()
+            or loc in str(session.get("circuit_short_name") or "").lower()
+        ]
+
+    if not sessions:
+        if year >= now.year:
+            return SESSION_NOT_HELD_MESSAGE
+        label = location or country
+        return f"Database Error: Could not locate a race session in {label} for {year}."
+
+    if len(sessions) > 1 and not location and country in MULTI_GP_COUNTRIES:
+        return multi_gp_clarification(country)
+
+    session = sessions[0]
+    start = _parse_iso(session.get("date_start"))
+    if start and start > now:
+        return SESSION_NOT_HELD_MESSAGE
+    return session
 
 
-def get_fastest_lap_of_race(year: int, country: str, driver_number: int = None):
+def get_session_info(country: str, year: int = 2024, location: str | None = None):
+    """Fetch scheduling data for a Grand Prix race session."""
+    session = fetch_race_session(year, country, location=location)
+    if isinstance(session, str):
+        return session
+    return {
+        "circuit": session.get("circuit_short_name"),
+        "date_start": session.get("date_start"),
+        "session_name": session.get("session_name"),
+    }
+
+
+def get_fastest_lap_of_race(
+    year: int,
+    country: str,
+    driver_number: int = None,
+    location: str | None = None,
+    now: datetime | None = None,
+):
     """
     Finds the fastest lap of a specific historical race session.
     If a driver_number is provided, finds THAT driver's specific fastest lap.
     """
     try:
-        session_url = f"{BASE_URL}/sessions?country_name={country}&year={year}&session_name=Race"
-        session_res = requests.get(session_url)
+        session = fetch_race_session(year, country, location=location, now=now)
+        if isinstance(session, str):
+            return session
 
-        if session_res.status_code != 200 or not session_res.json():
-            return f"Database Error: Could not locate a race session in {country} for {year}."
+        session_key = session["session_key"]
+        race_label = f"{session.get('location') or country} {year}"
 
-        session_key = session_res.json()[0]["session_key"]
-
-        laps_url = f"{BASE_URL}/laps?session_key={session_key}"
-        laps_res = requests.get(laps_url)
-        laps_data = laps_res.json()
+        laps_res = requests.get(f"{BASE_URL}/laps", params={"session_key": session_key})
+        laps_data = _payload_list(laps_res.json()) if laps_res.status_code == 200 else []
 
         if not laps_data:
             return "No lap data found for this session."
@@ -98,12 +189,15 @@ def get_fastest_lap_of_race(year: int, country: str, driver_number: int = None):
 
         fastest_lap = min(valid_laps, key=lambda x: x["lap_duration"])
 
-        driver_url = f"{BASE_URL}/drivers?session_key={session_key}&driver_number={fastest_lap['driver_number']}"
-        driver_res = requests.get(driver_url).json()
-        driver_name = driver_res[0]["full_name"] if driver_res else f"Driver {fastest_lap['driver_number']}"
+        driver_res = requests.get(
+            f"{BASE_URL}/drivers",
+            params={"session_key": session_key, "driver_number": fastest_lap["driver_number"]},
+        )
+        driver_payload = _payload_list(driver_res.json()) if driver_res.status_code == 200 else []
+        driver_name = driver_payload[0]["full_name"] if driver_payload else f"Driver {fastest_lap['driver_number']}"
 
         return {
-            "race": f"{country} {year}",
+            "race": race_label,
             "driver": driver_name,
             "lap_number": fastest_lap["lap_number"],
             "lap_time_seconds": fastest_lap["lap_duration"],
@@ -114,32 +208,47 @@ def get_fastest_lap_of_race(year: int, country: str, driver_number: int = None):
         return f"Historical Archive Error: {str(e)}"
 
 
-def get_historical_lap(year: int, country: str, driver_number: int, lap_number: int):
+def get_historical_lap(
+    year: int,
+    country: str,
+    driver_number: int,
+    lap_number: int,
+    location: str | None = None,
+    now: datetime | None = None,
+):
     """Fetch data for a specific lap of a specific driver in a historical race."""
     try:
-        session_url = f"{BASE_URL}/sessions?country_name={country}&year={year}&session_name=Race"
-        session_res = requests.get(session_url)
+        session = fetch_race_session(year, country, location=location, now=now)
+        if isinstance(session, str):
+            return session
 
-        if session_res.status_code != 200 or not session_res.json():
-            return f"Database Error: Could not locate a race session in {country} for {year}."
+        session_key = session["session_key"]
+        race_label = f"{session.get('location') or country} {year}"
 
-        session_key = session_res.json()[0]["session_key"]
-
-        laps_url = f"{BASE_URL}/laps?session_key={session_key}&driver_number={driver_number}&lap_number={lap_number}"
-        laps_res = requests.get(laps_url)
-        laps_data = laps_res.json()
+        laps_res = requests.get(
+            f"{BASE_URL}/laps",
+            params={
+                "session_key": session_key,
+                "driver_number": driver_number,
+                "lap_number": lap_number,
+            },
+        )
+        laps_data = _payload_list(laps_res.json()) if laps_res.status_code == 200 else []
 
         if not laps_data:
-            return f"No data found for Driver {driver_number}, Lap {lap_number} in {country} {year}."
+            return f"No data found for Driver {driver_number}, Lap {lap_number} in {race_label}."
 
         lap = laps_data[0]
 
-        driver_url = f"{BASE_URL}/drivers?session_key={session_key}&driver_number={driver_number}"
-        driver_res = requests.get(driver_url).json()
-        driver_name = driver_res[0]["full_name"] if driver_res else f"Driver {driver_number}"
+        driver_res = requests.get(
+            f"{BASE_URL}/drivers",
+            params={"session_key": session_key, "driver_number": driver_number},
+        )
+        driver_payload = _payload_list(driver_res.json()) if driver_res.status_code == 200 else []
+        driver_name = driver_payload[0]["full_name"] if driver_payload else f"Driver {driver_number}"
 
         return {
-            "race": f"{country} {year}",
+            "race": race_label,
             "driver": driver_name,
             "lap_number": lap["lap_number"],
             "lap_time_seconds": lap.get("lap_duration"),

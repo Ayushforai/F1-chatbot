@@ -70,22 +70,23 @@ def extract_telemetry_params(user_query: str, history: list[dict] = None) -> dic
         '  "driver_number": int or null (Map names: Lewis/Hamilton=44, Max/Verstappen=1, Lando/Norris=4, Charles/Leclerc=16, Carlos/Sainz=55, Oscar/Piastri=81, George/Russell=63, etc.),\n'
         '  "driver_name": string or null (the driver surname only, e.g. "Hamilton", "Verstappen", "Norris". Extract from the query.),\n'
         '  "year": int (default to 2026 if not mentioned, but use the year explicitly stated in the query),\n'
-        '  "country": string or null,\n'
+        '  "country": string or null (OpenF1 country_name: United Kingdom, United Arab Emirates, Italy, United States, Monaco, ...),\n'
+        '  "location": string or null (circuit or city when known, e.g. "Monza", "Imola", "Miami", "Austin", "Las Vegas", "Silverstone"),\n'
         '  "lap_number": int or null\n'
         "}\n\n"
-        "CRITICAL rules for 'country':\n"
-        '- Extract the country from the Grand Prix name. Examples: "Monaco Grand Prix" -> "Monaco", '
-        '"British Grand Prix" -> "Great Britain", "Spanish Grand Prix" -> "Spain", '
-        '"Italian Grand Prix" -> "Italy", "Belgian Grand Prix" -> "Belgium", '
-        '"Abu Dhabi Grand Prix" -> "Abu Dhabi", "Saudi Arabian Grand Prix" -> "Saudi Arabia", '
-        '"Dutch Grand Prix" -> "Netherlands", "Hungarian Grand Prix" -> "Hungary", '
-        '"Japanese Grand Prix" -> "Japan", "Australian Grand Prix" -> "Australia", '
-        '"Canadian Grand Prix" -> "Canada", "Austrian Grand Prix" -> "Austria", '
-        '"Azerbaijan Grand Prix" -> "Azerbaijan", "Singapore Grand Prix" -> "Singapore", '
-        '"Mexican Grand Prix" -> "Mexico", "Brazilian Grand Prix" -> "Brazil", '
-        '"Las Vegas Grand Prix" -> "United States", "Miami Grand Prix" -> "United States", '
-        '"United States Grand Prix" -> "United States", "Chinese Grand Prix" -> "China", '
-        '"Bahrain Grand Prix" -> "Bahrain", "Qatar Grand Prix" -> "Qatar".\n'
+        "CRITICAL rules for 'country' and 'location':\n"
+        "- Map Grand Prix names to the OpenF1 country_name (NOT informal synonyms):\n"
+        '  "British Grand Prix" / Silverstone / UK / Great Britain -> country="United Kingdom", location="Silverstone",\n'
+        '  "Abu Dhabi Grand Prix" / Yas Marina -> country="United Arab Emirates", location="Yas Island",\n'
+        '  "Italian Grand Prix" / Monza -> country="Italy", location="Monza",\n'
+        '  "Emilia Romagna Grand Prix" / Imola -> country="Italy", location="Imola",\n'
+        '  "Miami Grand Prix" -> country="United States", location="Miami",\n'
+        '  "United States Grand Prix" / Austin / COTA -> country="United States", location="Austin",\n'
+        '  "Las Vegas Grand Prix" -> country="United States", location="Las Vegas",\n'
+        '  "Monaco Grand Prix" -> country="Monaco", "Spanish Grand Prix" -> country="Spain",\n'
+        '  "Belgian Grand Prix" -> country="Belgium", "Dutch Grand Prix" -> country="Netherlands",\n'
+        '  "Brazilian Grand Prix" / Sao Paulo -> country="Brazil", "Mexican Grand Prix" -> country="Mexico".\n'
+        "- If the user only says Italy or United States / USA without naming the race or circuit, still set country but leave location null.\n"
         "- The country must NEVER be null if a Grand Prix or location is mentioned.\n\n"
         "IMPORTANT: If the user asks a follow-up (e.g. 'and in 2026?', 'what about Max?'), "
         "inherit missing parameters from the conversation history. Only override fields the user explicitly changes.\n"
@@ -112,4 +113,4 @@ def extract_telemetry_params(user_query: str, history: list[dict] = None) -> dic
 
         return json.loads(raw_text)
     except Exception:
-        return {"query_type": "live_telemetry", "driver_number": 44, "year": 2026, "country": None, "lap_number": None}
+        return {"query_type": "live_telemetry", "driver_number": None, "year": 2026, "country": None, "location": None, "lap_number": None}
