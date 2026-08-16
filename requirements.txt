@@ -1,5 +1,6 @@
 streamlit
 huggingface_hub
+python-dotenv
 pandas
 faiss-cpu
 sentence-transformers
