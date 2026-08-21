@@ -200,6 +200,7 @@ def get_fastest_lap_of_race(
             "race": race_label,
             "driver": driver_name,
             "lap_number": fastest_lap["lap_number"],
+            "lap_time": format_lap_time(fastest_lap["lap_duration"]),
             "lap_time_seconds": fastest_lap["lap_duration"],
             "average_speed": fastest_lap.get("st_speed"),
         }
@@ -251,6 +252,7 @@ def get_historical_lap(
             "race": race_label,
             "driver": driver_name,
             "lap_number": lap["lap_number"],
+            "lap_time": format_lap_time(lap.get("lap_duration")),
             "lap_time_seconds": lap.get("lap_duration"),
             "base_speed": lap.get("st_speed"),
             "is_pit_out_lap": lap.get("is_pit_out_lap"),

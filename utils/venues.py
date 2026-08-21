@@ -104,6 +104,14 @@ COUNTRY_SYNONYMS = {
     "spanish": "Spain",
     "barcelona": "Spain",
     "catalunya": "Spain",
+    "france": "France",
+    "french": "France",
+    "paul ricard": "France",
+    "germany": "Germany",
+    "german": "Germany",
+    "hockenheim": "Germany",
+    "nurburgring": "Germany",
+    "nürburgring": "Germany",
     "united arab emirates": "United Arab Emirates",
     "uae": "United Arab Emirates",
     "abu dhabi": "United Arab Emirates",
@@ -129,12 +137,6 @@ GP_ALIASES: list[tuple[str, str, str | None]] = [
     ("emilia-romagna grand prix", "Italy", "Imola"),
     ("emilia romagna gp", "Italy", "Imola"),
     ("emilia romagna", "Italy", "Imola"),
-    ("italian grand prix", "Italy", "Monza"),
-    ("italian gp", "Italy", "Monza"),
-    ("united states grand prix", "United States", "Austin"),
-    ("united states gp", "United States", "Austin"),
-    ("us grand prix", "United States", "Austin"),
-    ("us gp", "United States", "Austin"),
     ("las vegas grand prix", "United States", "Las Vegas"),
     ("las vegas gp", "United States", "Las Vegas"),
     ("miami grand prix", "United States", "Miami"),
@@ -158,13 +160,28 @@ GP_ALIASES: list[tuple[str, str, str | None]] = [
     ("yas island", "United Arab Emirates", "Yas Island"),
 ]
 
+# Race-name shorthands that identify a multi-GP country but not the circuit.
+# These must prompt venue clarification instead of silently picking one race.
+MULTI_GP_AMBIGUOUS_ALIASES: list[tuple[str, str]] = [
+    ("italian grand prix", "Italy"),
+    ("italian gp", "Italy"),
+    ("united states grand prix", "United States"),
+    ("united states gp", "United States"),
+    ("us grand prix", "United States"),
+    ("us gp", "United States"),
+    ("american grand prix", "United States"),
+    ("american gp", "United States"),
+    ("usa gp", "United States"),
+    ("usa grand prix", "United States"),
+]
+
 CSV_RACE_KEYWORDS = {
     ("Australia", None): "Australian",
     ("Austria", None): "Austrian",
     ("Azerbaijan", None): "Azerbaijan",
     ("Bahrain", None): "Bahrain",
     ("Belgium", None): "Belgian",
-    ("Brazil", None): "Brazilian",
+    ("Brazil", None): ["Brazilian", "Sao Paulo", "São Paulo"],
     ("Canada", None): "Canadian",
     ("China", None): "Chinese",
     ("France", None): "French",
@@ -173,7 +190,7 @@ CSV_RACE_KEYWORDS = {
     ("Italy", "Imola"): "Emilia Romagna",
     ("Italy", "Monza"): "Italian",
     ("Japan", None): "Japanese",
-    ("Mexico", None): "Mexican",
+    ("Mexico", None): ["Mexican", "Mexico City"],
     ("Monaco", None): "Monaco",
     ("Netherlands", None): "Dutch",
     ("Qatar", None): "Qatar",
@@ -190,6 +207,29 @@ CSV_RACE_KEYWORDS = {
     ("Great Britain", None): "British",
     ("Abu Dhabi", None): "Abu Dhabi",
 }
+
+_MULTI_GP_LOCATIONS = {"Imola", "Monza", "Miami", "Austin", "Las Vegas"}
+
+
+def _csv_keyword_gp_aliases() -> list[tuple[str, str, str | None]]:
+    """Build '{Nationality} GP' aliases for single-venue countries from CSV keywords."""
+    rows: list[tuple[str, str, str | None]] = []
+    seen: set[tuple[str, str, str | None]] = set()
+    for (country, location), keyword in CSV_RACE_KEYWORDS.items():
+        if location in _MULTI_GP_LOCATIONS:
+            continue
+        keywords = keyword if isinstance(keyword, list) else [keyword]
+        for kw in keywords:
+            for suffix in (" grand prix", " gp"):
+                alias = f"{kw.lower()}{suffix}"
+                key = (alias, country, location)
+                if key not in seen:
+                    seen.add(key)
+                    rows.append(key)
+    return rows
+
+
+GP_ALIASES.extend(_csv_keyword_gp_aliases())
 
 
 def _normalize(text: str) -> str:
@@ -217,12 +257,29 @@ def multi_gp_clarification(country: str) -> str:
     )
 
 
-def csv_race_keyword(country: str | None, location: str | None = None) -> str | None:
+def is_multi_gp_clarification(message: str) -> bool:
+    return message.startswith("Which Grand Prix do you mean?")
+
+
+def csv_race_keywords(country: str | None, location: str | None = None) -> list[str]:
+    """Return all CSV race-name substrings that can identify this venue."""
     if not country:
-        return None
+        return []
+    raw = None
     if location and (country, location) in CSV_RACE_KEYWORDS:
-        return CSV_RACE_KEYWORDS[(country, location)]
-    return CSV_RACE_KEYWORDS.get((country, None), country)
+        raw = CSV_RACE_KEYWORDS[(country, location)]
+    else:
+        raw = CSV_RACE_KEYWORDS.get((country, None), country)
+    if raw is None:
+        return []
+    if isinstance(raw, list):
+        return raw
+    return [raw]
+
+
+def csv_race_keyword(country: str | None, location: str | None = None) -> str | None:
+    keys = csv_race_keywords(country, location)
+    return keys[0] if keys else None
 
 
 def resolve_venue(
@@ -248,6 +305,12 @@ def resolve_venue(
 
     if specific:
         return {"kind": "ok", "country": specific[0], "location": specific[1]}
+
+    for alias, mapped_country in sorted(
+        MULTI_GP_AMBIGUOUS_ALIASES, key=lambda row: len(row[0]), reverse=True,
+    ):
+        if _alias_in_text(alias, text) and mapped_country in MULTI_GP_COUNTRIES:
+            return {"kind": "clarify", "message": multi_gp_clarification(mapped_country)}
 
     canonical = None
     for candidate in (location, country):

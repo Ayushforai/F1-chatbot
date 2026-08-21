@@ -14,12 +14,58 @@ def _clean(value) -> str:
     return str(value)
 
 
+def _classification_line(row) -> str:
+    """One grid line: position, driver, team, race time or DNF, points, fastest lap."""
+    fl = _clean(row.get("fastestLapTime"))
+    fl_lap = _clean(row.get("fastestLap"))
+    if fl != "N/A" and fl_lap != "N/A":
+        pace = f", fastest lap {fl} (lap {fl_lap})"
+    elif fl != "N/A":
+        pace = f", fastest lap {fl}"
+    else:
+        pace = ""
+
+    status = _clean(row.get("status"))
+    time_or_gap = _clean(row.get("time"))
+    if time_or_gap == "N/A" and status not in ("N/A", "Finished"):
+        time_or_gap = status
+
+    extra_status = ""
+    if status not in ("N/A", "Finished") and time_or_gap != status:
+        extra_status = f" [{status}]"
+
+    return (
+        f"P{_clean(row['positionText'])}: {row['forename']} {row['surname']} "
+        f"({row['constructor_name']}) — {time_or_gap}, {_clean(row['points'])} pts"
+        f"{pace}{extra_status}"
+    )
+
+
+def _overall_fastest_lap_line(race_rows: pd.DataFrame) -> str:
+    ranked = race_rows.copy()
+    ranked["_rank"] = pd.to_numeric(ranked["rank"], errors="coerce")
+    best = ranked[ranked["_rank"] == 1]
+    if best.empty:
+        with_time = ranked[ranked["fastestLapTime"].apply(_clean) != "N/A"]
+        if with_time.empty:
+            return ""
+        best = with_time
+    row = best.iloc[0]
+    lap_no = _clean(row.get("fastestLap"))
+    lap_bit = f" on lap {lap_no}" if lap_no != "N/A" else ""
+    return (
+        f"Overall fastest lap: {row['forename']} {row['surname']} "
+        f"{_clean(row['fastestLapTime'])}{lap_bit}."
+    )
+
+
 def build_historical_documents() -> list[Document]:
     races = pd.read_csv(os.path.join(DATA_DIR, "races.csv"))
     drivers = pd.read_csv(os.path.join(DATA_DIR, "drivers.csv"))
     constructors = pd.read_csv(os.path.join(DATA_DIR, "constructors.csv"))
     results = pd.read_csv(os.path.join(DATA_DIR, "results.csv"))
     standings = pd.read_csv(os.path.join(DATA_DIR, "driver_standings.csv"))
+    status = pd.read_csv(os.path.join(DATA_DIR, "status.csv"))
 
     merged = (
         results.merge(drivers[["driverId", "forename", "surname"]], on="driverId")
@@ -31,25 +77,26 @@ def build_historical_documents() -> list[Document]:
             races[["raceId", "year", "round", "name"]].rename(columns={"name": "race_name"}),
             on="raceId",
         )
+        .merge(status, on="statusId", how="left")
         .sort_values(["year", "round", "positionOrder"])
     )
 
     docs: list[Document] = []
 
-    # One document per race keeps the FAISS index small and retrieval accurate.
+    # One document per race, with the full classification (not just the top 10).
     for race_id, race_rows in merged.groupby("raceId", sort=False):
         race_rows = race_rows.sort_values("positionOrder")
         first = race_rows.iloc[0]
-        lines = []
-        for _, row in race_rows.head(10).iterrows():
-            lines.append(
-                f"P{_clean(row['positionText'])}: {row['forename']} {row['surname']} "
-                f"({row['constructor_name']}) — {_clean(row['time'])}, {_clean(row['points'])} pts"
-            )
+        lines = [_classification_line(row) for _, row in race_rows.iterrows()]
+        fl_line = _overall_fastest_lap_line(race_rows)
+        body = "\n".join(lines)
+        if fl_line:
+            body = f"{body}\n{fl_line}"
 
         text = (
-            f"{first['year']} {first['race_name']} (Round {first['round']}) race results:\n"
-            + "\n".join(lines)
+            f"{first['year']} {first['race_name']} (Round {first['round']}) "
+            f"full race classification ({len(race_rows)} entries):\n"
+            f"{body}"
         )
         docs.append(
             Document(

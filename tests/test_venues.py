@@ -62,10 +62,13 @@ class TestVenueSynonyms(unittest.TestCase):
         self.assertIn("Monza", venue["message"])
 
     def test_monza_and_imola_are_specific(self):
-        monza = resolve_venue(query="fastest lap at the Italian Grand Prix 2024")
+        monza = resolve_venue(query="fastest lap at Monza 2024")
         self.assertEqual(monza, {"kind": "ok", "country": "Italy", "location": "Monza"})
         imola = resolve_venue(query="fastest lap Imola 2024")
         self.assertEqual(imola, {"kind": "ok", "country": "Italy", "location": "Imola"})
+        italian_gp = resolve_venue(query="fastest lap at the Italian Grand Prix 2024")
+        self.assertEqual(italian_gp["kind"], "clarify")
+        self.assertIn("Imola", italian_gp["message"])
 
     def test_united_states_without_circuit_asks_which_gp(self):
         venue = resolve_venue(country="United States", query="fastest lap in the USA 2024")
@@ -74,9 +77,22 @@ class TestVenueSynonyms(unittest.TestCase):
         self.assertIn("Austin", venue["message"])
         self.assertIn("Las Vegas", venue["message"])
 
-    def test_us_gp_aliases_to_austin(self):
-        venue = resolve_venue(query="fastest lap at the United States Grand Prix 2024")
-        self.assertEqual(venue, {"kind": "ok", "country": "United States", "location": "Austin"})
+    def test_us_gp_asks_which_venue(self):
+        for query in (
+            "results of US gp 2023?",
+            "fastest lap at the United States Grand Prix 2024",
+            "results of united states gp 2024",
+        ):
+            venue = resolve_venue(query=query)
+            self.assertEqual(venue["kind"], "clarify", query)
+            self.assertIn("Miami", venue["message"], query)
+            self.assertIn("Austin", venue["message"], query)
+
+    def test_austin_and_cota_are_specific(self):
+        for query in ("fastest lap at COTA 2024", "results of Austin gp 2023"):
+            venue = resolve_venue(query=query)
+            self.assertEqual(venue["kind"], "ok", query)
+            self.assertEqual(venue["location"], "Austin", query)
 
     def test_miami_and_vegas_aliases(self):
         self.assertEqual(
@@ -96,6 +112,9 @@ class TestVenueSynonyms(unittest.TestCase):
         self.assertEqual(csv_race_keyword("United States", "Miami"), "Miami")
         self.assertEqual(csv_race_keyword("United States", "Austin"), "United States Grand Prix")
         self.assertEqual(csv_race_keyword("United States", "Las Vegas"), "Las Vegas")
+        from utils.venues import csv_race_keywords
+        self.assertIn("São Paulo", csv_race_keywords("Brazil"))
+        self.assertIn("Mexico City", csv_race_keywords("Mexico"))
 
 
 class TestOpenF1VenueAndFutureSession(unittest.TestCase):

@@ -2,23 +2,201 @@ import json
 import re
 import ollama
 
+from utils.venues import resolve_venue
+
 MODEL_NAME = "qwen2.5:7b-instruct-q8_0"
+
+VALID_CATEGORIES = [
+    "sporting",
+    "technical",
+    "financial",
+    "operational",
+    "quantitative",
+    "historical",
+]
+
+CAPABILITIES_MENU = """Here is what I can help with:
+
+• Race results & full classifications — e.g. "Results of Monaco GP 2019"
+• Lap times, fastest laps & driver deltas — e.g. "Fastest lap at Silverstone 2024" or "Time delta between Bottas and Stroll on lap 32 of Azerbaijan GP 2017"
+• Live telemetry — e.g. "Live telemetry for driver #1" (when a session is live)
+• Historical facts — winners, podiums, season standings, past seasons
+• Sporting rules — penalties, safety car, race procedures
+• Technical regulations — engines, aerodynamics, weight, fuel limits
+• Financial regulations — cost cap, budget penalties
+• Operational rules — power units, testing limits, garage procedures
+
+Include a Grand Prix, driver, year, or rules topic in your question for the best answer."""
+
+AMBIGUOUS_QUERY_PROMPT = (
+    "Your question is a bit broad for me to look up reliably. "
+    "Please be more specific — mention a Grand Prix, driver, year, or rules topic.\n\n"
+    + CAPABILITIES_MENU
+)
+
+VAGUE_SINGLE_WORDS = {
+    "f1",
+    "formula",
+    "race",
+    "racing",
+    "driver",
+    "drivers",
+    "telemetry",
+    "stats",
+    "statistics",
+    "history",
+    "rules",
+    "regulations",
+    "help",
+}
+
+VAGUE_PHRASES = (
+    "tell me about f1",
+    "tell me about formula",
+    "something about f1",
+    "about f1",
+    "about formula 1",
+    "about formula one",
+    "f1 stats",
+    "race stats",
+    "formula 1 stats",
+)
+
+# How many prior turns `main()` retains in memory.
+CONVERSATION_MEMORY_TURNS = 5
+# How many of those turns are injected into router/extractor/generation prompts.
+ROUTER_CONTEXT_TURNS = 3
+MAX_ANSWER_CHARS_IN_PROMPT = 2500
 
 
 def _format_history(history: list[dict]) -> str:
-    """Format recent conversation turns into a string for LLM context."""
+    """Format recent conversation turns, including assistant answers, for LLM context."""
     if not history:
         return ""
     lines = []
-    for turn in history[-3:]:
+    for turn in history[-ROUTER_CONTEXT_TURNS:]:
         lines.append(f"User: {turn['query']}")
         if turn.get("category"):
             lines.append(f"  -> Routed to: {turn['category']}")
+        answer = turn.get("answer")
+        if answer:
+            if len(answer) > MAX_ANSWER_CHARS_IN_PROMPT:
+                answer = answer[:MAX_ANSWER_CHARS_IN_PROMPT] + "\n... [truncated]"
+            lines.append(f"Assistant: {answer}")
     return "Recent conversation:\n" + "\n".join(lines) + "\n\n"
 
 
+def is_capabilities_request(user_query: str) -> bool:
+    q = user_query.lower().strip()
+    if q in {"?", "help", "help me", "menu", "options"}:
+        return True
+    hints = (
+        "what can you do",
+        "what do you do",
+        "what can you answer",
+        "what can you help",
+        "how can you help",
+        "show me what you can",
+        "capabilities",
+        "your capabilities",
+    )
+    return any(hint in q for hint in hints)
+
+
+def _looks_like_follow_up(user_query: str, history: list[dict] | None) -> bool:
+    if not history:
+        return False
+    q = user_query.lower().strip()
+    if re.search(r"\b((?:19|20)\d{2})\b", user_query) and len(q.split()) <= 4:
+        return True
+    follow_hints = (
+        "what about",
+        "how about",
+        "and in",
+        "same race",
+        "this race",
+        "that race",
+        "who finished",
+        "who won",
+        "who came",
+        "what was",
+    )
+    return any(hint in q for hint in follow_hints) or len(q.split()) <= 3
+
+
+def _query_has_specific_topic(user_query: str) -> bool:
+    q = user_query.lower()
+    if re.search(r"\b((?:19|20)\d{2})\b", user_query):
+        return True
+    venue = resolve_venue(query=user_query)
+    if venue["kind"] in ("ok", "clarify"):
+        return True
+    if re.search(r"#\s*\d+", user_query):
+        return True
+    topic_hints = (
+        "fastest lap",
+        "lap time",
+        "lap delta",
+        "time delta",
+        "telemetry",
+        "cost cap",
+        "budget cap",
+        "engine",
+        "aero",
+        "aerodynamic",
+        "safety car",
+        "penalty",
+        "dnf",
+        "qualifying",
+        "pole",
+        "standings",
+        "championship",
+        "who won",
+        "results",
+        "classification",
+        "regulation",
+        "power unit",
+        "live data",
+        "grand prix",
+        " gp",
+        "gp ",
+    )
+    return any(hint in q for hint in topic_hints)
+
+
+def is_ambiguous_query(user_query: str, history: list[dict] | None = None) -> bool:
+    q = user_query.lower().strip()
+    if not q:
+        return True
+    if is_capabilities_request(user_query):
+        return True
+    if _looks_like_follow_up(user_query, history):
+        return False
+    if q in VAGUE_SINGLE_WORDS:
+        return True
+    if any(phrase in q for phrase in VAGUE_PHRASES):
+        return True
+    if _query_has_specific_topic(user_query):
+        return False
+    if len(q.split()) <= 2 and not re.search(r"\b((?:19|20)\d{2})\b", user_query):
+        return True
+    return False
+
+
+def ambiguous_query_response(user_query: str) -> str:
+    if is_capabilities_request(user_query):
+        return CAPABILITIES_MENU
+    return AMBIGUOUS_QUERY_PROMPT
+
+
+def get_ambiguous_query_response(user_query: str, history: list[dict] | None = None) -> str | None:
+    if not is_ambiguous_query(user_query, history):
+        return None
+    return ambiguous_query_response(user_query)
+
+
 def route_query(user_query: str, history: list[dict] = None) -> str:
-    valid_categories = ["sporting", "technical", "financial", "operational", "quantitative", "historical"]
+    valid_categories = VALID_CATEGORIES
 
     history_context = _format_history(history) if history else ""
 
@@ -52,10 +230,11 @@ def route_query(user_query: str, history: list[dict] = None) -> str:
         for category in valid_categories:
             if category in classification:
                 return category
-        return "sporting"
+        print(f" [Router Warning] Unrecognized classification: {classification!r}")
+        return "ambiguous"
     except Exception as e:
         print(f"Routing error: {e}")
-        return "sporting"
+        return "ambiguous"
 
 
 def extract_telemetry_params(user_query: str, history: list[dict] = None) -> dict:
@@ -69,7 +248,7 @@ def extract_telemetry_params(user_query: str, history: list[dict] = None) -> dic
         '  "query_type": string ("fastest_lap", "specific_lap", "live_telemetry", or "historical_info"),\n'
         '  "driver_number": int or null (Map names: Lewis/Hamilton=44, Max/Verstappen=1, Lando/Norris=4, Charles/Leclerc=16, Carlos/Sainz=55, Oscar/Piastri=81, George/Russell=63, etc.),\n'
         '  "driver_name": string or null (the driver surname only, e.g. "Hamilton", "Verstappen", "Norris". Extract from the query.),\n'
-        '  "year": int (default to 2026 if not mentioned, but use the year explicitly stated in the query),\n'
+        '  "year": int or null (null if the user did not mention a season; do not guess),\n'
         '  "country": string or null (OpenF1 country_name: United Kingdom, United Arab Emirates, Italy, United States, Monaco, ...),\n'
         '  "location": string or null (circuit or city when known, e.g. "Monza", "Imola", "Miami", "Austin", "Las Vegas", "Silverstone"),\n'
         '  "lap_number": int or null\n'
@@ -113,4 +292,12 @@ def extract_telemetry_params(user_query: str, history: list[dict] = None) -> dic
 
         return json.loads(raw_text)
     except Exception:
-        return {"query_type": "live_telemetry", "driver_number": None, "year": 2026, "country": None, "location": None, "lap_number": None}
+        return {
+            "query_type": "live_telemetry",
+            "driver_number": None,
+            "driver_name": None,
+            "year": None,
+            "country": None,
+            "location": None,
+            "lap_number": None,
+        }
