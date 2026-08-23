@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import patch
 
 import app
+from utils.citations import rag_regulations
 
 
 class RegulationsYearDefaultTests(unittest.TestCase):
@@ -11,11 +12,15 @@ class RegulationsYearDefaultTests(unittest.TestCase):
         self.assertIn("different year", offer.lower())
 
     def test_regulations_rag_search_includes_year(self):
-        with patch("app.vector_search", return_value=["cost cap chunk"]) as search:
-            context = app._regulations_rag_context("financial", "cost cap", 2026)
-        search.assert_called_once_with("financial", "cost cap 2026", k=5)
+        with patch(
+            "app.search_regulations",
+            return_value=(["cost cap chunk"], [{"source": "data/financial.pdf", "page": 0, "article_id": "D4"}]),
+        ) as search:
+            context, source = app._regulations_rag_context("financial", "cost cap", 2026)
+        search.assert_called_once_with("financial", "cost cap", year=2026)
         self.assertIn("Season: 2026", context)
         self.assertIn("cost cap chunk", context)
+        self.assertIn("financial regulations (2026)", source.label)
 
     def test_yearless_regulations_defaults_to_current_year(self):
         with patch("app.current_regulations_year", return_value=2026):
@@ -41,14 +46,20 @@ class RegulationsYearDefaultTests(unittest.TestCase):
             }
         ]
         with (
-            patch("app._regulations_rag_context", return_value="Season: 2024\n\nCap was 140M") as rag,
+            patch(
+                "app._regulations_rag_context",
+                return_value=(
+                    "Season: 2024\n\nCap was 140M",
+                    rag_regulations(category="financial", year=2024, doc_labels=["financial.pdf"]),
+                ),
+            ) as rag,
             patch("app.generate_f1_response", return_value="The 2024 cost cap was $140M.") as generate,
             patch("app._respond_and_remember") as remember,
         ):
             pending = history[-1]
             category = pending["category"]
             year = app._resolve_pending_year("2024")
-            context = app._regulations_rag_context(category, pending["pending_query"], year)
+            context, _source = app._regulations_rag_context(category, pending["pending_query"], year)
             answer = app.generate_f1_response(
                 pending["pending_query"],
                 context,

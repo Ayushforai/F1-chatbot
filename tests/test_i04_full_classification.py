@@ -57,14 +57,15 @@ class TestI04FullClassification(unittest.TestCase):
         with (
             patch("app.extract_telemetry_params", return_value={"year": 2008, "country": "Great Britain", "driver_name": ""}),
             patch("app.get_historical_driver_info", return_value=packet) as csv_fn,
-            patch("app.vector_search") as rag,
+            patch("app.search_with_metadata") as rag,
         ):
-            ctx = app._historical_context("complete race results of the 2008 British Grand Prix", [])
+            ctx, source = app._historical_context("complete race results of the 2008 British Grand Prix", [])
 
         csv_fn.assert_called()
         rag.assert_not_called()
         self.assertIn("British Grand Prix", ctx)
         self.assertIn("The results for the 2008 British Grand Prix are as follows:", ctx)
+        self.assertIsNotNone(source)
 
     def test_plain_results_query_uses_csv(self):
         self.assertTrue(app._wants_full_classification_or_pace("results of brazilian gp 2021?"))
@@ -76,9 +77,9 @@ class TestI04FullClassification(unittest.TestCase):
         with (
             patch("app.extract_telemetry_params", return_value={"year": 2026, "country": "Brazil", "driver_name": ""}),
             patch("app.get_historical_driver_info", return_value=packet) as csv_fn,
-            patch("app.vector_search") as rag,
+            patch("app.search_with_metadata") as rag,
         ):
-            ctx = app._historical_context("results of brazilian gp 2021?", [])
+            ctx, _source = app._historical_context("results of brazilian gp 2021?", [])
         csv_fn.assert_called_once()
         self.assertEqual(csv_fn.call_args.args[0], 2021)
         rag.assert_not_called()
@@ -138,9 +139,9 @@ class TestI04FullClassification(unittest.TestCase):
     def test_german_gp_2019_prefers_csv_over_rag(self):
         with (
             patch("app.extract_telemetry_params", return_value={"year": 2026, "country": None, "driver_name": ""}),
-            patch("app.vector_search") as rag,
+            patch("app.search_with_metadata") as rag,
         ):
-            ctx = app._historical_context("results of german gp 2019?", [])
+            ctx, _source = app._historical_context("results of german gp 2019?", [])
 
         rag.assert_not_called()
         self.assertIn("German Grand Prix", ctx)

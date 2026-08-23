@@ -9,6 +9,8 @@ load_dotenv(_PROJECT_ROOT / ".env")
 
 EMBEDDING_MODEL = "BAAI/bge-base-en-v1.5"
 
+_embeddings: HuggingFaceEmbeddings | None = None
+
 
 def _hf_token() -> str | None:
     token = os.getenv("HF_TOKEN") or os.getenv("HUGGING_FACE_HUB_TOKEN")
@@ -18,7 +20,7 @@ def _hf_token() -> str | None:
     return token
 
 
-def get_embeddings() -> HuggingFaceEmbeddings:
+def _build_embeddings() -> HuggingFaceEmbeddings:
     # CPU avoids MPS instability with sentence-transformers on macOS.
     model_kwargs: dict = {"device": "cpu"}
     token = _hf_token()
@@ -30,3 +32,22 @@ def get_embeddings() -> HuggingFaceEmbeddings:
         model_kwargs=model_kwargs,
         encode_kwargs={"normalize_embeddings": True},
     )
+
+
+def get_embeddings() -> HuggingFaceEmbeddings:
+    """Return a process-wide cached embedding model (weights load once)."""
+    global _embeddings
+    if _embeddings is None:
+        _embeddings = _build_embeddings()
+    return _embeddings
+
+
+def preload_embeddings() -> HuggingFaceEmbeddings:
+    """Eagerly load embedding weights. Call once at process startup."""
+    return get_embeddings()
+
+
+def clear_embeddings_cache() -> None:
+    """Release the cached model. Mainly for tests."""
+    global _embeddings
+    _embeddings = None

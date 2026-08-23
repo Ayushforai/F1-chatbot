@@ -7,6 +7,7 @@ from utils.venues import resolve_venue
 MODEL_NAME = "qwen2.5:7b-instruct-q8_0"
 
 VALID_CATEGORIES = [
+    "general",
     "sporting",
     "technical",
     "financial",
@@ -21,6 +22,7 @@ CAPABILITIES_MENU = """Here is what I can help with:
 • Lap times, fastest laps & driver deltas — e.g. "Fastest lap at Silverstone 2024" or "Time delta between Bottas and Stroll on lap 32 of Azerbaijan GP 2017"
 • Live telemetry — e.g. "Live telemetry for driver #1" (when a session is live)
 • Historical facts — winners, podiums, season standings, past seasons
+• General regulations — definitions, entries, governance, championship format
 • Sporting rules — penalties, safety car, race procedures
 • Technical regulations — engines, aerodynamics, weight, fuel limits
 • Financial regulations — cost cap, budget penalties
@@ -155,8 +157,18 @@ def _query_has_specific_topic(user_query: str) -> bool:
         "results",
         "classification",
         "regulation",
+        "section a",
+        "general provision",
+        "entry application",
+        "licence",
+        "license",
         "power unit",
         "live data",
+        "races are held",
+        "races held in",
+        "hosted in",
+        "which races",
+        "what races",
         "grand prix",
         " gp",
         "gp ",
@@ -196,19 +208,27 @@ def get_ambiguous_query_response(user_query: str, history: list[dict] | None = N
 
 
 def route_query(user_query: str, history: list[dict] = None) -> str:
+    from utils.venues import is_country_race_listing_query
+
+    if is_country_race_listing_query(user_query):
+        return "historical"
+
     valid_categories = VALID_CATEGORIES
 
     history_context = _format_history(history) if history else ""
 
     system_prompt = (
         "You are an F1 data routing assistant. Categorize the user's query into exactly ONE "
-        "of these categories: sporting, technical, financial, operational, quantitative, or historical.\n\n"
+        "of these categories: general, sporting, technical, financial, operational, quantitative, or historical.\n\n"
         "Rules:\n"
         "- Respond with ONLY the category word in lowercase. Do not add punctuation.\n"
         "- 'historical': Questions about past race results, which team a driver raced for in a specific year, "
-        "championship winners, driver standings, podium finishes, or any factual question about a specific past race or season.\n"
-        "- 'quantitative': Direct requests for live stats, telemetry, speed, RPMs, gear data, or lap times.\n"
-        "- 'sporting': Current-season grid positions, penalties, race procedures, safety car rules.\n"
+        "championship winners, driver standings, podium finishes, or any factual question about a specific past race or season. "
+        "Do NOT use historical for top-speed or speed-trap questions — those are quantitative.\n"
+        "- 'quantitative': Direct requests for live stats, telemetry, speed, top speed, speed trap, RPMs, gear data, or lap times.\n"
+        "- 'general': Section A / general regulatory provisions ONLY — definitions, entries, licences, "
+        "championship format, governance. Do NOT use general for country or Grand Prix listing questions.\n"
+        "- 'sporting': Penalties, race procedures, safety car rules, sprint format, scrutineering.\n"
         "- 'technical': Engine specifications, aerodynamics, weight, wings, fuel limits.\n"
         "- 'financial': Cost cap, team spending, budget penalties.\n"
         "- 'operational': Power unit allocation limits, team testing limits, garage rules.\n\n"

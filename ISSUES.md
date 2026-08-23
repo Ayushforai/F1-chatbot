@@ -34,13 +34,13 @@ Living backlog. Add new items as we spot them during testing. Check them off as 
 - [ ] **B02** (Medium) — Historical CSV fallback only runs if vector search **throws**; empty/irrelevant chunks still answer — `app.py` `_historical_context`
 - [x] **B03** (Medium) — `get_session_info` takes **first session** of weekend (often FP1), not Race — `utils/f1_api.py`
 - [ ] **B04** (Low) — If historical CSVs missing, module prints warning then **NameError** on use — `utils/historical_db.py`
-- [ ] **B05** (Low) — Regulation PDF matcher is keyword-on-filename only — `pdf_processor.py` — Section A General never indexed.
+- [x] **B05** (Low) — Regulation PDF matcher is keyword-on-filename only — `pdf_processor.py` — Section A General never indexed.
 - [x] **B06** (Low) — HF Hub unauthenticated warning on startup — `utils/embeddings.py` — Set `HF_TOKEN` in `.env`; dotenv already wired.
 
 ### Product / pipeline gaps
 
 - [ ] **P01** (Medium) — `streamlit` in `requirements.txt` but app is CLI-only (`app.py`)
-- [ ] **P02** (Medium) — No source citation in answers (race doc / PDF chunk / API field)
+- [x] **P02** (Medium) — No source citation in answers (race doc / PDF chunk / API field)
 - [x] **P03** (Low) — No guard when OpenF1 returns empty for future year / wrong country
 - [x] **P04** (Low) — Emilia Romagna / sprint weekends / multi-race countries poorly mapped
 
@@ -78,6 +78,8 @@ Living backlog. Add new items as we spot them during testing. Check them off as 
 - [x] **B06** — 2026-08-21 — `HF_TOKEN` loaded from `.env` at app startup; passed explicitly to `HuggingFaceEmbeddings`. See `.env.example`.
 - [x] **I07** — 2026-08-21 — Ambiguous queries get a specificity prompt or capabilities menu; invalid router output returns `ambiguous` instead of defaulting to sporting.
 - [x] **I05** — 2026-08-21 — Driver-team career questions use CSV lookup via `get_driver_teams()` on `results.csv` (e.g. “Which team did Hamilton drive for in 2012?”) instead of RAG alone.
+- [x] **P02** — 2026-08-23 — Answers append a source footer (CSV file, OpenF1 endpoint, RAG document/chunk, or conversation memory).
+- [x] **B05** — 2026-08-23 — Regulation PDFs indexed by Section A–E / legacy filenames from `data/` and `data/archive/`, with article-aware chunking, `articles.json` exact lookup, and hybrid RAG search.
 
 ---
 

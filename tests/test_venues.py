@@ -4,7 +4,15 @@ from unittest.mock import MagicMock, patch
 
 import app
 from utils.f1_api import SESSION_NOT_HELD_MESSAGE, fetch_race_session, get_fastest_lap_of_race
-from utils.venues import csv_race_keyword, resolve_venue
+from utils.venues import (
+    countries_in_query,
+    csv_race_keyword,
+    format_multi_gp_listing_answer,
+    is_country_race_listing_query,
+    is_multi_gp_listing_query,
+    resolve_venue,
+    uses_csv_country_race_listing,
+)
 
 
 def _response(payload, status=200):
@@ -115,6 +123,30 @@ class TestVenueSynonyms(unittest.TestCase):
         from utils.venues import csv_race_keywords
         self.assertIn("São Paulo", csv_race_keywords("Brazil"))
         self.assertIn("Mexico City", csv_race_keywords("Mexico"))
+
+    def test_countries_in_query_finds_italy_and_usa(self):
+        countries = countries_in_query("what all races are held in italy and USA?")
+        self.assertIn("Italy", countries)
+        self.assertIn("United States", countries)
+
+    def test_multi_gp_listing_query_detection(self):
+        self.assertTrue(
+            is_multi_gp_listing_query("what all races are held in italy and USA?")
+        )
+        self.assertFalse(is_multi_gp_listing_query("cost cap in 2026"))
+
+    def test_india_listing_uses_csv_not_multi_gp_map(self):
+        self.assertTrue(is_country_race_listing_query("grand prixs held in india?"))
+        self.assertTrue(uses_csv_country_race_listing("grand prixs held in india?"))
+        self.assertFalse(is_multi_gp_listing_query("grand prixs held in india?"))
+
+    def test_format_multi_gp_listing_answer(self):
+        answer = format_multi_gp_listing_answer("what races are held in Italy and USA?")
+        self.assertIn("Monza", answer)
+        self.assertIn("Imola", answer)
+        self.assertIn("Miami", answer)
+        self.assertIn("Las Vegas", answer)
+        self.assertIn("Austin", answer)
 
 
 class TestOpenF1VenueAndFutureSession(unittest.TestCase):

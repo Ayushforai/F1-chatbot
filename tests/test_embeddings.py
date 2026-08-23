@@ -2,7 +2,7 @@ import os
 import unittest
 from unittest.mock import patch
 
-from utils.embeddings import _hf_token, get_embeddings
+from utils.embeddings import _hf_token, clear_embeddings_cache, get_embeddings
 
 
 class EmbeddingAuthTests(unittest.TestCase):
@@ -23,6 +23,14 @@ class EmbeddingAuthTests(unittest.TestCase):
         model_kwargs = mock_embeddings.call_args.kwargs["model_kwargs"]
         self.assertEqual(model_kwargs["token"], "hf_test")
         self.assertEqual(model_kwargs["device"], "cpu")
+
+    @patch("utils.embeddings._build_embeddings")
+    def test_get_embeddings_is_singleton(self, mock_build):
+        first = get_embeddings()
+        second = get_embeddings()
+        self.assertIs(first, second)
+        mock_build.assert_called_once()
+        clear_embeddings_cache()
 
 
 if __name__ == "__main__":

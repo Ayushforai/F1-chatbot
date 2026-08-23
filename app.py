@@ -4,6 +4,9 @@ from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
+from utils.terminal_input import read_user_query
+
+import os
 import re
 from datetime import datetime
 
@@ -21,25 +24,56 @@ from utils.f1_api import (
     get_driver_telemetry,
     get_fastest_lap_of_race,
     get_historical_lap,
+    get_max_speed_trap,
+    get_max_speed_trap_season,
 )
-from utils.vector_store import search as vector_search
+from utils.vector_store import search_regulations, search_with_metadata, warmup_rag
+from utils.citations import (
+    SourceCitation,
+    append_citation,
+    citation_from_historical_metadata,
+    citation_from_regulation_metadata,
+    conversation_memory,
+    csv_country_races,
+    csv_driver_teams,
+    csv_lap_times,
+    csv_race_results,
+    multi_gp_venue_map,
+    openf1_api,
+    openf1_speed_trap,
+    speed_trap_records,
+    venue_label,
+)
 from utils.historical_db import (
+    format_country_grand_prix_listing_answer,
     format_driver_teams,
     format_lap_time_delta,
     format_race_classification,
+    format_top_speed_lookup,
     get_driver_teams,
     get_historical_driver_info,
     get_lap_time_delta,
 )
+from utils.speed_records import best_speed_trap_record, speed_record_to_packet
 from utils.currency import apply_currency_display, get_currency_prompt_rules, refresh_exchange_rates
-from utils.venues import is_multi_gp_clarification, resolve_venue
+from utils.venues import (
+    MULTI_GP_COUNTRIES,
+    countries_in_query,
+    format_multi_gp_listing_answer,
+    is_country_race_listing_query,
+    is_multi_gp_clarification,
+    is_multi_gp_listing_query,
+    query_introduces_new_country,
+    resolve_venue,
+    uses_csv_country_race_listing,
+)
 
 MODEL_NAME = 'qwen2.5:7b-instruct-q8_0'
 
 DEFAULT_YEAR = 2026
 CONVERSATION_MEMORY_TURNS = 5
 
-REGULATION_CATEGORIES = frozenset({"sporting", "technical", "financial", "operational"})
+REGULATION_CATEGORIES = frozenset({"general", "sporting", "technical", "financial", "operational"})
 
 MISSING_YEAR_MESSAGE = (
     "Which season or year are you referring to? "
@@ -112,10 +146,37 @@ def current_regulations_year() -> int:
     return datetime.now().year
 
 
-def _regulations_rag_context(category: str, user_query: str, year: int) -> str:
+def _regulations_rag_context(
+    category: str,
+    user_query: str,
+    year: int,
+) -> tuple[str, SourceCitation]:
     print(f" [RAG] Searching {category} regulations for {year}...")
-    chunks = vector_search(category, f"{user_query} {year}", k=5)
-    return f"Season: {year}\n\n" + "\n\n".join(chunks)
+    chunks, metadata = search_regulations(category, user_query, year=year)
+    source = citation_from_regulation_metadata(category, year, metadata)
+    context = f"Season: {year}\n\n" + "\n\n".join(chunks)
+    return context, source
+
+
+def _csv_race_citation_from_query(
+    user_query: str,
+    year: int,
+    country: str | None = None,
+    location: str | None = None,
+) -> SourceCitation:
+    if country or location:
+        return csv_race_results(year=year, venue=venue_label(year=year, country=country, location=location))
+    venue = resolve_venue(query=user_query)
+    if venue["kind"] == "ok":
+        return csv_race_results(
+            year=year,
+            venue=venue_label(
+                year=year,
+                country=venue.get("country"),
+                location=venue.get("location"),
+            ),
+        )
+    return csv_race_results(year=year)
 
 
 def _regulations_year_offer(year: int) -> str:
@@ -284,9 +345,11 @@ def _respond_and_remember(
     user_query: str,
     category: str,
     answer: str,
+    source: SourceCitation | None = None,
     **extra,
 ) -> None:
     answer = apply_currency_display(answer, user_query=user_query, category=category)
+    answer = append_citation(answer, source)
     print(f"\nResponse:\n{answer}\n")
     print("-" * 50)
     _save_conversation_turn(history, _make_turn(user_query, category, answer, **extra))
@@ -441,11 +504,22 @@ def _respond_lap_comparison(conversation_history: list[dict], user_query: str) -
         extra["year"] = race_ctx["year"]
     if race_ctx.get("query"):
         extra["race_lookup_query"] = race_ctx["query"]
+    lap_number = _lap_number_from_query(user_query)
+    source = csv_lap_times(
+        year=race_ctx.get("year") or _explicit_year(user_query) or 0,
+        venue=venue_label(
+            year=race_ctx.get("year"),
+            country=race_ctx.get("country"),
+            location=race_ctx.get("location"),
+        ),
+        lap=lap_number,
+    )
     _respond_and_remember(
         conversation_history,
         user_query,
         "historical",
         lap_answer,
+        source=source,
         **extra,
     )
     return True
@@ -469,6 +543,10 @@ def _looks_like_race_results_answer(answer: str) -> bool:
 def _prior_answer_likely_sufficient(user_query: str, prior_answer: str) -> bool:
     """Heuristic check: is the stored answer likely to contain this follow-up fact?"""
     if not prior_answer.strip():
+        return False
+    if is_country_race_listing_query(user_query):
+        return False
+    if query_introduces_new_country(user_query, prior_answer):
         return False
     if _user_wants_fresh_lookup(user_query):
         return False
@@ -528,7 +606,10 @@ def _prior_turn_race_context(prior: dict) -> dict | None:
     }
 
 
-def _build_follow_up_lookup_context(user_query: str, history: list[dict]) -> str | None:
+def _build_follow_up_lookup_context(
+    user_query: str,
+    history: list[dict],
+) -> tuple[str, SourceCitation] | None:
     """Fetch fresh data for a follow-up when memory alone is not enough."""
     if not history:
         return None
@@ -554,7 +635,8 @@ def _build_follow_up_lookup_context(user_query: str, history: list[dict]) -> str
         return (
             "Use the FRESH LOOKUP DATA below to answer the follow-up.\n\n"
             f"FRESH LOOKUP DATA:\n{fresh}\n\n"
-            f"{_follow_up_context(history)}"
+            f"{_follow_up_context(history)}",
+            csv_driver_teams(year=year),
         )
 
     race_ctx = _prior_turn_race_context(prior)
@@ -570,18 +652,25 @@ def _build_follow_up_lookup_context(user_query: str, history: list[dict]) -> str
             "Use the FRESH LOOKUP DATA below to answer the follow-up. "
             "Prefer this data over the previous answer if they disagree.\n\n"
             f"FRESH LOOKUP DATA:\n{fresh}\n\n"
-            f"{_follow_up_context(history)}"
+            f"{_follow_up_context(history)}",
+            _csv_race_citation_from_query(
+                race_ctx["query"],
+                race_ctx["year"],
+                country=race_ctx.get("country"),
+                location=race_ctx.get("location"),
+            ),
         )
 
     if prior.get("category") == "historical":
         print(" [Lookup] Searching historical sources for follow-up...")
         enriched = f"{prior.get('query', '')} {user_query}".strip()
-        context = _historical_context(enriched, history)
+        context, source = _historical_context(enriched, history)
         if context and not context.startswith("No race results found"):
             return (
                 "Use the FRESH LOOKUP DATA below to answer the follow-up.\n\n"
                 f"FRESH LOOKUP DATA:\n{context}\n\n"
-                f"{_follow_up_context(history)}"
+                f"{_follow_up_context(history)}",
+                source,
             )
 
     if prior.get("category") == "quantitative" and prior.get("lookup_params"):
@@ -596,7 +685,8 @@ def _build_follow_up_lookup_context(user_query: str, history: list[dict]) -> str
             return (
                 "Use the FRESH LOOKUP DATA below to answer the follow-up.\n\n"
                 f"FRESH LOOKUP DATA:\n{result['context']}\n\n"
-                f"{_follow_up_context(history)}"
+                f"{_follow_up_context(history)}",
+                result["source"],
             )
 
     return None
@@ -627,6 +717,7 @@ def _try_driver_team_follow_up(user_query: str, history: list[dict]) -> dict | N
         "answer": answer,
         "year": year,
         "driver_lookup_query": driver_ctx["query"],
+        "source": csv_driver_teams(year=year),
     }
 
 
@@ -653,14 +744,15 @@ def _try_answer_follow_up(user_query: str, history: list[dict]) -> dict | None:
             _follow_up_context(history),
             history=history,
         )
-        return {"category": category, "answer": answer}
+        return {"category": category, "answer": answer, "source": conversation_memory()}
 
     reason = "user requested verification" if wants_lookup else "prior answer insufficient"
     print(f" [Memory] Follow-up needs fresh lookup ({reason})")
-    lookup_context = _build_follow_up_lookup_context(user_query, history)
-    if lookup_context is None:
+    lookup = _build_follow_up_lookup_context(user_query, history)
+    if lookup is None:
         return None
 
+    lookup_context, source = lookup
     answer = generate_f1_response(user_query, lookup_context, history=history)
     extra = {}
     driver_ctx = _prior_turn_driver_team_context(prior)
@@ -673,12 +765,17 @@ def _try_answer_follow_up(user_query: str, history: list[dict]) -> dict | None:
     if race_ctx:
         extra["year"] = race_ctx["year"]
         extra["race_lookup_query"] = race_ctx["query"]
-    return {"category": category, "answer": answer, **extra}
+    return {"category": category, "answer": answer, "source": source, **extra}
 
 
 def _is_answer_follow_up(user_query: str, history: list[dict]) -> bool:
     """True when the user is likely asking about the immediately previous answer."""
     if not history or not history[-1].get("answer"):
+        return False
+    if is_country_race_listing_query(user_query):
+        return False
+    prior_answer = history[-1].get("answer", "")
+    if query_introduces_new_country(user_query, prior_answer):
         return False
     if _is_race_results_query(user_query):
         return False
@@ -758,25 +855,39 @@ def resolve_quantitative_query(params: dict, user_query: str = "") -> dict:
     if query_requires_driver(q_type, country) and not _has_driver(driver):
         return {"kind": "clarify", "message": MISSING_DRIVER_MESSAGE}
 
+    venue_detail = venue_label(year=year, country=country, location=location)
+
     if q_type == "fastest_lap" and country:
         print(f" [API Connection] Scanning {year} {country} archives for the fastest lap...")
         telemetry_data = get_fastest_lap_of_race(year, country, driver, location=location)
         if telemetry_data == SESSION_NOT_HELD_MESSAGE:
             return {"kind": "error", "message": SESSION_NOT_HELD_MESSAGE}
-        return {"kind": "context", "context": f"Historical Fastest Lap Record: {str(telemetry_data)}"}
+        return {
+            "kind": "context",
+            "context": f"Historical Fastest Lap Record: {str(telemetry_data)}",
+            "source": openf1_api(endpoint="fastest lap", detail=venue_detail),
+        }
 
     if (q_type == "specific_lap" or lap is not None) and country:
         print(f" [API Connection] Accessing historical archives for {country} {year}, Lap {lap}...")
         telemetry_data = get_historical_lap(year, country, driver, lap, location=location)
         if telemetry_data == SESSION_NOT_HELD_MESSAGE:
             return {"kind": "error", "message": SESSION_NOT_HELD_MESSAGE}
-        return {"kind": "context", "context": f"Historical Lap Data Packet: {str(telemetry_data)}"}
+        return {
+            "kind": "context",
+            "context": f"Historical Lap Data Packet: {str(telemetry_data)}",
+            "source": openf1_api(endpoint=f"lap {lap}", detail=venue_detail),
+        }
 
     print(f" [API Connection] Querying live OpenF1 data stream for Driver #{driver}...")
     telemetry_data = get_driver_telemetry(driver_number=driver)
     if telemetry_data == LIVE_DATA_UNAVAILABLE_MESSAGE:
         return {"kind": "error", "message": LIVE_DATA_UNAVAILABLE_MESSAGE}
-    return {"kind": "context", "context": f"Live telemetry data from vehicle streams: {str(telemetry_data)}"}
+    return {
+        "kind": "context",
+        "context": f"Live telemetry data from vehicle streams: {str(telemetry_data)}",
+        "source": openf1_api(endpoint="live telemetry", detail=f"driver #{driver}"),
+    }
 
 def generate_f1_response(
     user_query: str,
@@ -830,8 +941,21 @@ def _year_from_query(user_query: str, extracted) -> int | None:
 
 
 def _explicit_year(user_query: str) -> int | None:
+    if _parse_decade(user_query) is not None:
+        return None
     match = re.search(r"\b((?:19|20)\d{2})\b", user_query)
     return int(match.group(1)) if match else None
+
+
+def _parse_decade(user_query: str) -> tuple[int, int] | None:
+    """Parse decades like 2010s or 1990's into (start_year, end_year)."""
+    match = re.search(r"\b((?:19|20)(\d{2}))\s*(?:'s|s)\b", user_query, re.I)
+    if not match:
+        return None
+    start = int(match.group(1))
+    if start % 10 != 0:
+        return None
+    return start, start + 9
 
 
 def _wants_full_classification_or_pace(user_query: str) -> bool:
@@ -922,6 +1046,273 @@ def _lookup_driver_teams(
     return format_driver_teams(result)
 
 
+def _is_top_speed_query(user_query: str) -> bool:
+    """True when the user asks about peak or trap speeds."""
+    if _is_lap_comparison_query(user_query):
+        return False
+    q = user_query.lower()
+    patterns = (
+        "top speed",
+        "highest speed",
+        "maximum speed",
+        "max speed",
+        "speed trap",
+        "fastest speed",
+        "fastest an f1",
+        "how fast can",
+        "how fast did",
+        "ever attained",
+        "ever recorded",
+        "ever reached",
+        "fastest ever",
+    )
+    return any(pattern in q for pattern in patterns)
+
+
+def _is_global_top_speed_query(user_query: str) -> bool:
+    q = user_query.lower()
+    return any(
+        phrase in q
+        for phrase in (
+            "ever attained",
+            "ever recorded",
+            "ever reached",
+            "in history",
+            "all time",
+            "all-time",
+            "has an f1 car",
+            "has a f1 car",
+            "fastest ever",
+        )
+    )
+
+
+def _no_speed_trap_data_message(scope: str) -> str:
+    return (
+        f"No speed-trap data is available for {scope}. "
+        "The historical CSV dataset only includes fastest-lap average speeds "
+        "(~240–260 km/h), not peak speed-trap readings. "
+        "OpenF1 speed-trap telemetry is available from 2023 onward; "
+        "earlier peaks come from published timing records when we have them."
+    )
+
+
+def _lookup_top_speed(
+    user_query: str,
+    history: list[dict],
+    *,
+    year: int | None = None,
+    venue: dict | None = None,
+) -> tuple[str, SourceCitation | None, dict]:
+    params = extract_telemetry_params(user_query, history=history)
+    decade = _parse_decade(user_query)
+    year_start = None
+    year_end = None
+
+    if decade is not None:
+        year_start, year_end = decade
+        year = None
+    elif year is None:
+        year = _explicit_year(user_query) or params.get("year")
+        if year is None:
+            for turn in reversed(history):
+                if turn.get("year") is not None:
+                    year = turn["year"]
+                    break
+
+    if venue is None:
+        venue = resolve_venue(
+            country=params.get("country"),
+            location=params.get("location"),
+            query=user_query,
+        )
+
+    if venue["kind"] == "clarify":
+        return venue["message"], None, {}
+
+    driver_number = params.get("driver_number")
+    country = venue["country"] if venue["kind"] == "ok" else None
+    location = venue.get("location") if venue["kind"] == "ok" else None
+
+    if decade is not None:
+        scope_label = f"{year_start}s"
+    elif venue["kind"] == "ok":
+        scope_label = venue_label(year=year, country=country, location=location)
+    elif year is not None:
+        scope_label = str(year)
+    else:
+        scope_label = "all time"
+
+    packets: list[dict] = []
+    source: SourceCitation | None = None
+
+    print(f" [Records] Checking published speed-trap records for {scope_label}...")
+    published = best_speed_trap_record(
+        year=year,
+        year_start=year_start,
+        year_end=year_end,
+        country=country,
+        location=location,
+    )
+    if published:
+        packets.append(speed_record_to_packet(published))
+        source = speed_trap_records(scope=scope_label)
+
+    trap: dict | str | None = None
+    if year is not None and year >= 2023:
+        if venue["kind"] == "ok":
+            print(f" [API] Scanning {scope_label} for peak speed-trap readings...")
+            trap = get_max_speed_trap(
+                year,
+                country,
+                location=location,
+                driver_number=driver_number,
+            )
+        else:
+            print(f" [API] Scanning {year} season for peak speed-trap readings...")
+            trap = get_max_speed_trap_season(
+                year,
+                driver_number=driver_number,
+            )
+
+    if isinstance(trap, dict):
+        if not packets or trap["speed_kmh"] > packets[0]["speed_kmh"]:
+            packets.insert(0, trap)
+        elif len(packets) == 1:
+            pass
+        else:
+            packets.append(trap)
+        source = openf1_speed_trap(detail=trap["race"])
+    elif isinstance(trap, str) and not packets:
+        if is_multi_gp_clarification(trap):
+            return trap, None, {}
+
+    if not packets:
+        message = trap if isinstance(trap, str) else _no_speed_trap_data_message(scope_label)
+        return message, None, {}
+
+    answer = format_top_speed_lookup(packets, scope=scope_label)
+    extra: dict = {"top_speed_query": user_query}
+    if year is not None:
+        extra["year"] = year
+    elif decade is not None:
+        extra["year_start"] = year_start
+        extra["year_end"] = year_end
+    return answer, source, extra
+
+
+def _handle_top_speed_query(conversation_history: list[dict], user_query: str) -> bool:
+    """Answer top-speed / speed-trap questions from OpenF1 and published records."""
+    if not _is_top_speed_query(user_query):
+        return False
+
+    params = extract_telemetry_params(user_query, history=conversation_history)
+    decade = _parse_decade(user_query)
+    year = None if decade else (_explicit_year(user_query) or params.get("year"))
+    venue = resolve_venue(
+        country=params.get("country"),
+        location=params.get("location"),
+        query=user_query,
+    )
+
+    if venue["kind"] == "clarify":
+        if _maybe_ask_for_venue(
+            conversation_history,
+            user_query,
+            "quantitative",
+            "top_speed",
+            year=year,
+        ):
+            return True
+
+    if (
+        decade is None
+        and venue["kind"] == "ok"
+        and year is None
+        and not _is_global_top_speed_query(user_query)
+    ):
+        year_result = resolve_race_results_year(user_query, conversation_history)
+        if year_result["kind"] == "clarify":
+            message = year_result["message"]
+            print(f"\nResponse:\n{message}\n")
+            print("-" * 50)
+            _save_conversation_turn(
+                conversation_history,
+                {
+                    **_prompt_for_year(
+                        user_query,
+                        "quantitative",
+                        "top_speed",
+                        pending_query=user_query,
+                    ),
+                    "answer": message,
+                },
+            )
+            return True
+        year = year_result["year"]
+
+    answer, source, extra = _lookup_top_speed(
+        user_query,
+        conversation_history,
+        year=year,
+        venue=venue,
+    )
+    if is_multi_gp_clarification(answer):
+        _maybe_ask_for_venue(
+            conversation_history,
+            user_query,
+            "quantitative",
+            "top_speed",
+            year=year,
+        )
+        return True
+
+    _respond_and_remember(
+        conversation_history,
+        user_query,
+        "quantitative",
+        answer,
+        source=source,
+        **extra,
+    )
+    return True
+
+
+def _handle_country_race_listing_query(conversation_history: list[dict], user_query: str) -> bool:
+    """Answer questions about which GPs are or were held in a country."""
+    if not is_country_race_listing_query(user_query):
+        return False
+
+    countries = countries_in_query(user_query)
+    if uses_csv_country_race_listing(user_query):
+        answer = format_country_grand_prix_listing_answer(user_query, countries)
+        if answer is None:
+            return False
+        print(" [CSV] Looking up Grands Prix by country from historical data...")
+        source = csv_country_races(countries=countries)
+    else:
+        answer = format_multi_gp_listing_answer(user_query)
+        if answer is None:
+            return False
+        countries = [country for country in countries if country in MULTI_GP_COUNTRIES]
+        print(" [Venues] Listing multi-GP countries from calendar map...")
+        source = multi_gp_venue_map(countries=countries)
+
+    _respond_and_remember(
+        conversation_history,
+        user_query,
+        "historical",
+        answer,
+        source=source,
+        country_race_listing_query=user_query,
+    )
+    return True
+
+
+def _handle_multi_gp_listing_query(conversation_history: list[dict], user_query: str) -> bool:
+    return _handle_country_race_listing_query(conversation_history, user_query)
+
+
 def _handle_driver_team_query(conversation_history: list[dict], user_query: str) -> bool:
     """Answer driver-team career questions from CSV. Returns True if handled."""
     if not _is_driver_team_query(user_query):
@@ -963,6 +1354,7 @@ def _handle_driver_team_query(conversation_history: list[dict], user_query: str)
         user_query,
         "historical",
         answer,
+        source=csv_driver_teams(year=year),
         year=year,
         driver_lookup_query=user_query,
     )
@@ -1014,38 +1406,54 @@ def _csv_historical_record(
     return f"Historical Race Record: {historical_data}"
 
 
-def _historical_context(user_query: str, history: list[dict]) -> str:
+def _historical_context(user_query: str, history: list[dict]) -> tuple[str, SourceCitation | None]:
     if _is_driver_team_query(user_query):
         year_result = resolve_driver_team_year(user_query, history)
         if year_result["kind"] == "ok":
-            answer = _lookup_driver_teams(user_query, year_result["year"])
+            year = year_result["year"]
+            answer = _lookup_driver_teams(user_query, year)
             print(" [CSV] Using driver-team lookup...")
-            return answer
+            return answer, csv_driver_teams(year=year)
 
     try:
         csv_record = _csv_historical_record(user_query, history)
         if csv_record:
             print(" [CSV] Using full race classification...")
-            return csv_record
+            year = _explicit_year(user_query)
+            if year is None:
+                for turn in reversed(history):
+                    if turn.get("year") is not None:
+                        year = turn["year"]
+                        break
+            source = (
+                _csv_race_citation_from_query(user_query, year)
+                if year is not None
+                else None
+            )
+            return csv_record, source
     except Exception as e:
         print(f" [CSV Warning] Structured lookup failed ({e}). Falling back to RAG...")
 
     if _is_race_results_query(user_query) and _explicit_year(user_query) is None:
         return (
             "No race results found in the historical CSV database. "
-            "Specify the year in your query and try again."
+            "Specify the year in your query and try again.",
+            None,
         )
 
     try:
         print(" [RAG] Searching historical vector store...")
-        chunks = vector_search("historical", user_query, k=5)
-        return "\n\n".join(chunks)
+        chunks, metadata = search_with_metadata("historical", user_query, k=5)
+        source = citation_from_historical_metadata(metadata)
+        return "\n\n".join(chunks), source
     except Exception as e:
         print(f" [RAG Warning] Vector search failed ({e}). Falling back to CSV lookup...")
         csv_record = _csv_historical_record(user_query, history)
         if csv_record:
-            return csv_record
-        return f"Historical Race Record: lookup failed ({e})"
+            year = _explicit_year(user_query)
+            source = _csv_race_citation_from_query(user_query, year) if year else None
+            return csv_record, source
+        return f"Historical Race Record: lookup failed ({e})", None
 
 
 def _prompt_for_year(user_query: str, category: str, pending_kind: str, **pending_extra) -> dict:
@@ -1113,6 +1521,12 @@ def _handle_venue_clarification_resume(conversation_history: list[dict], user_qu
             user_query,
             category,
             answer,
+            source=_csv_race_citation_from_query(
+                enriched_query,
+                year,
+                country=venue["country"],
+                location=venue.get("location"),
+            ),
             year=year,
             race_lookup_query=enriched_query,
             country=venue["country"],
@@ -1150,10 +1564,64 @@ def _handle_venue_clarification_resume(conversation_history: list[dict], user_qu
             user_query,
             category,
             answer,
+            source=csv_lap_times(
+                year=year,
+                venue=venue_label(
+                    year=year,
+                    country=venue["country"],
+                    location=venue.get("location"),
+                ),
+                lap=lap_number,
+            ),
             year=year,
             race_lookup_query=enriched_query,
             country=venue["country"],
             location=venue.get("location"),
+        )
+        return True
+
+    if pending_kind == "top_speed":
+        original_query = pending.get("pending_query", user_query)
+        enriched_query = f"{original_query} {user_query}".strip() if user_query else original_query
+        year = pending.get("year") or _explicit_year(enriched_query)
+        if year is None:
+            year_result = resolve_race_results_year(enriched_query, conversation_history)
+            if year_result["kind"] == "clarify":
+                message = year_result["message"]
+                print(f"\nResponse:\n{message}\n")
+                print("-" * 50)
+                _save_conversation_turn(
+                    conversation_history,
+                    {
+                        **_prompt_for_year(
+                            user_query,
+                            category,
+                            "top_speed",
+                            pending_query=enriched_query,
+                            country=venue["country"],
+                            location=venue.get("location"),
+                        ),
+                        "answer": message,
+                    },
+                )
+                return True
+            year = year_result["year"]
+
+        print(f" [Router] Resuming top-speed query after venue clarification")
+        answer, source, extra = _lookup_top_speed(
+            enriched_query,
+            conversation_history,
+            year=year,
+            venue=venue,
+        )
+        _respond_and_remember(
+            conversation_history,
+            user_query,
+            category,
+            answer,
+            source=source,
+            year=year,
+            **extra,
         )
         return True
 
@@ -1208,6 +1676,7 @@ def _handle_venue_clarification_resume(conversation_history: list[dict], user_qu
             user_query,
             category,
             answer,
+            source=result.get("source"),
             year=params.get("year"),
             lookup_params=params,
         )
@@ -1220,6 +1689,14 @@ def _handle_venue_clarification_resume(conversation_history: list[dict], user_qu
         MISSING_VENUE_MESSAGE,
     )
     return True
+
+
+def _rag_warmup_categories() -> list[str] | None:
+    """Optional comma-separated index categories to preload at startup."""
+    raw = os.getenv("RAG_WARMUP_CATEGORIES", "").strip()
+    if not raw:
+        return None
+    return [part.strip() for part in raw.split(",") if part.strip()]
 
 
 def main():
@@ -1235,12 +1712,15 @@ def main():
             f" [FX] Using fallback rates: 1 USD = {rates['usd_to_inr']:.2f} INR, "
             f"1 USD = {rates['usd_to_gbp']:.2f} GBP"
         )
+    print(" [RAG] Loading embedding model into memory...")
+    warmup_rag(categories=_rag_warmup_categories())
+    print(" [RAG] Embedding model ready.")
     print(f"\nPit Wall Active [Model: {MODEL_NAME}]. Type 'exit' to close telemetry link.\n")
 
     conversation_history = []
 
     while True:
-        user_query = input("Engineer Query > ").strip()
+        user_query = read_user_query("Engineer Query > ")
         if user_query.lower() in ['exit', 'quit']:
             break
         awaiting_year = conversation_history and conversation_history[-1].get("awaiting_year")
@@ -1257,7 +1737,15 @@ def main():
         if not awaiting_year and not awaiting_venue and _respond_lap_comparison(conversation_history, user_query):
             continue
 
+        if not awaiting_year and not awaiting_venue and _handle_top_speed_query(conversation_history, user_query):
+            continue
+
         if not awaiting_year and not awaiting_venue and _handle_driver_team_query(conversation_history, user_query):
+            continue
+
+        if not awaiting_year and not awaiting_venue and _handle_country_race_listing_query(
+            conversation_history, user_query
+        ):
             continue
 
         if (
@@ -1285,7 +1773,8 @@ def main():
                 user_query,
                 follow_up["category"],
                 follow_up["answer"],
-                **{k: v for k, v in follow_up.items() if k not in ("category", "answer")},
+                source=follow_up.get("source"),
+                **{k: v for k, v in follow_up.items() if k not in ("category", "answer", "source")},
             )
             continue
 
@@ -1322,6 +1811,7 @@ def main():
                     continue
                 _respond_and_remember(
                     conversation_history, user_query, "historical", answer,
+                    source=_csv_race_citation_from_query(original_query, year),
                     year=year, race_lookup_query=original_query,
                 )
                 continue
@@ -1344,8 +1834,28 @@ def main():
                     user_query,
                     category,
                     answer,
+                    source=csv_driver_teams(year=year),
                     year=year,
                     driver_lookup_query=original_query,
+                )
+                continue
+
+            if pending_kind == "top_speed":
+                print(" [Router] Resuming top-speed query after year clarification")
+                original_query = pending["pending_query"]
+                answer, source, extra = _lookup_top_speed(
+                    original_query,
+                    conversation_history,
+                    year=year,
+                )
+                _respond_and_remember(
+                    conversation_history,
+                    user_query,
+                    category,
+                    answer,
+                    source=source,
+                    year=year,
+                    **extra,
                 )
                 continue
 
@@ -1353,7 +1863,7 @@ def main():
                 print(" [Router] Resuming regulations query after year clarification")
                 original_query = pending["pending_query"]
                 try:
-                    context = _regulations_rag_context(category, original_query, year)
+                    context, source = _regulations_rag_context(category, original_query, year)
                 except FileNotFoundError as e:
                     print(f" [Error] {e}\n")
                     continue
@@ -1368,6 +1878,7 @@ def main():
                     user_query,
                     category,
                     answer,
+                    source=source,
                     year=year,
                     pending_query=original_query,
                 )
@@ -1397,6 +1908,7 @@ def main():
             )
             _respond_and_remember(
                 conversation_history, user_query, category, answer,
+                source=result.get("source"),
                 year=year, lookup_params=params,
             )
             continue
@@ -1420,6 +1932,8 @@ def main():
         # 2. Branching Execution Paths
         offer_other_year = False
         reg_year: int | None = None
+        source: SourceCitation | None = None
+        context = ""
 
         if category == "quantitative":
             print(" [Extractor] Processing query context via Qwen...")
@@ -1462,6 +1976,7 @@ def main():
                 )
                 continue
             context = result["context"]
+            source = result.get("source")
 
         elif category == "historical":
             pending_kind = "historical_race" if _is_race_results_query(user_query) else "historical"
@@ -1498,12 +2013,13 @@ def main():
                 )
                 _respond_and_remember(
                     conversation_history, user_query, category, answer,
+                    source=_csv_race_citation_from_query(user_query, year),
                     year=year, race_lookup_query=user_query,
                 )
                 continue
 
             print(" [History] Resolving race results...")
-            context = _historical_context(user_query, conversation_history)
+            context, source = _historical_context(user_query, conversation_history)
 
         else:
             reg_year = _explicit_year(user_query)
@@ -1512,7 +2028,7 @@ def main():
                 reg_year = current_regulations_year()
             history_extra["year"] = reg_year
             try:
-                context = _regulations_rag_context(category, user_query, reg_year)
+                context, source = _regulations_rag_context(category, user_query, reg_year)
             except FileNotFoundError as e:
                 print(f" [Error] {e}\n")
                 continue
@@ -1534,7 +2050,7 @@ def main():
             extra["pending_kind"] = "regulations"
             extra["pending_query"] = user_query
         _respond_and_remember(
-            conversation_history, user_query, category, answer, **extra,
+            conversation_history, user_query, category, answer, source=source, **extra,
         )
 
 if __name__ == "__main__":

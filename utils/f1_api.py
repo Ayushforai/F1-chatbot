@@ -96,18 +96,19 @@ def _payload_list(payload) -> list:
     return payload if isinstance(payload, list) else []
 
 
-def fetch_race_session(
+def fetch_session(
     year: int,
     country: str,
+    session_name: str = "Race",
     location: str | None = None,
     now: datetime | None = None,
 ):
-    """Return the OpenF1 Race session dict, or an error string."""
+    """Return the OpenF1 session dict for a Grand Prix weekend, or an error string."""
     now = now or datetime.now(timezone.utc)
     try:
         res = requests.get(
             f"{BASE_URL}/sessions",
-            params={"country_name": country, "year": year, "session_name": "Race"},
+            params={"country_name": country, "year": year, "session_name": session_name},
         )
     except Exception as e:
         return f"Historical Archive Error: {str(e)}"
@@ -130,7 +131,7 @@ def fetch_race_session(
         if year >= now.year:
             return SESSION_NOT_HELD_MESSAGE
         label = location or country
-        return f"Database Error: Could not locate a race session in {label} for {year}."
+        return f"Database Error: Could not locate a {session_name} session in {label} for {year}."
 
     if len(sessions) > 1 and not location and country in MULTI_GP_COUNTRIES:
         return multi_gp_clarification(country)
@@ -140,6 +141,16 @@ def fetch_race_session(
     if start and start > now:
         return SESSION_NOT_HELD_MESSAGE
     return session
+
+
+def fetch_race_session(
+    year: int,
+    country: str,
+    location: str | None = None,
+    now: datetime | None = None,
+):
+    """Return the OpenF1 Race session dict, or an error string."""
+    return fetch_session(year, country, session_name="Race", location=location, now=now)
 
 
 def get_session_info(country: str, year: int = 2024, location: str | None = None):
@@ -257,6 +268,208 @@ def get_historical_lap(
             "base_speed": lap.get("st_speed"),
             "is_pit_out_lap": lap.get("is_pit_out_lap"),
         }
+
+    except Exception as e:
+        return f"Historical Archive Error: {str(e)}"
+
+
+def _lap_peak_speed_kmh(lap: dict) -> tuple[float | None, str | None]:
+    """Return the best speed-trap reading on a lap and which field it came from."""
+    best = None
+    best_field = None
+    for field in ("st_speed", "i1_speed", "i2_speed"):
+        value = lap.get(field)
+        if value is None:
+            continue
+        try:
+            speed = float(value)
+        except (TypeError, ValueError):
+            continue
+        if speed <= 0:
+            continue
+        if best is None or speed > best:
+            best = speed
+            best_field = field
+    return best, best_field
+
+
+def _max_trap_from_session(
+    session: dict,
+    *,
+    driver_number: int | None = None,
+    session_name: str,
+) -> dict | None:
+    session_key = session["session_key"]
+    race_label = (
+        f"{session.get('location') or session.get('circuit_short_name')} "
+        f"{session.get('year')} ({session_name})"
+    )
+
+    params: dict = {"session_key": session_key}
+    if driver_number is not None:
+        params["driver_number"] = driver_number
+
+    laps_res = requests.get(f"{BASE_URL}/laps", params=params)
+    laps_data = _payload_list(laps_res.json()) if laps_res.status_code == 200 else []
+    if not laps_data:
+        return None
+
+    best_lap = None
+    best_speed = None
+    best_field = None
+    for lap in laps_data:
+        if lap.get("is_pit_out_lap"):
+            continue
+        speed, field = _lap_peak_speed_kmh(lap)
+        if speed is None:
+            continue
+        if best_speed is None or speed > best_speed:
+            best_speed = speed
+            best_field = field
+            best_lap = lap
+
+    if best_lap is None or best_speed is None:
+        return None
+
+    driver_res = requests.get(
+        f"{BASE_URL}/drivers",
+        params={
+            "session_key": session_key,
+            "driver_number": best_lap["driver_number"],
+        },
+    )
+    driver_payload = _payload_list(driver_res.json()) if driver_res.status_code == 200 else []
+    driver_name = (
+        driver_payload[0]["full_name"]
+        if driver_payload
+        else f"Driver {best_lap['driver_number']}"
+    )
+
+    field_labels = {
+        "st_speed": "speed trap",
+        "i1_speed": "intermediate 1",
+        "i2_speed": "intermediate 2",
+    }
+
+    return {
+        "race": race_label,
+        "measurement": "OpenF1 speed trap",
+        "speed_kmh": best_speed,
+        "speed_field": best_field,
+        "speed_field_label": field_labels.get(best_field, best_field),
+        "driver": driver_name,
+        "driver_number": best_lap["driver_number"],
+        "lap_number": best_lap["lap_number"],
+        "session": session_name,
+    }
+
+
+def _fetch_sessions_for_year(
+    year: int,
+    session_name: str,
+    now: datetime | None = None,
+) -> list[dict] | str:
+    """Return completed OpenF1 sessions for a calendar year, or an error string."""
+    now = now or datetime.now(timezone.utc)
+    try:
+        res = requests.get(
+            f"{BASE_URL}/sessions",
+            params={"year": year, "session_name": session_name},
+        )
+    except Exception as e:
+        return f"Historical Archive Error: {str(e)}"
+
+    if res.status_code == 429:
+        return "OpenF1 rate limit exceeded. Please try again in a minute."
+
+    sessions = _payload_list(res.json()) if res.status_code == 200 else []
+    completed: list[dict] = []
+    for session in sessions:
+        start = _parse_iso(session.get("date_start"))
+        if start and start > now:
+            continue
+        completed.append(session)
+
+    if not completed:
+        if year >= now.year:
+            return SESSION_NOT_HELD_MESSAGE
+        return f"No {session_name} sessions found for {year}."
+
+    return completed
+
+
+def get_max_speed_trap_season(
+    year: int,
+    driver_number: int | None = None,
+    now: datetime | None = None,
+):
+    """Return the highest speed-trap reading across an entire OpenF1 season."""
+    if year < 2023:
+        return "OpenF1 speed-trap data is only available from 2023 onward."
+
+    try:
+        best_packet = None
+        for session_name in ("Qualifying", "Race"):
+            sessions = _fetch_sessions_for_year(year, session_name, now=now)
+            if isinstance(sessions, str):
+                continue
+            for session in sessions:
+                packet = _max_trap_from_session(
+                    session,
+                    driver_number=driver_number,
+                    session_name=session_name,
+                )
+                if packet is None:
+                    continue
+                if best_packet is None or packet["speed_kmh"] > best_packet["speed_kmh"]:
+                    best_packet = packet
+
+        if best_packet is None:
+            return f"No speed-trap readings found for the {year} season."
+
+        return best_packet
+
+    except Exception as e:
+        return f"Historical Archive Error: {str(e)}"
+
+
+def get_max_speed_trap(
+    year: int,
+    country: str,
+    location: str | None = None,
+    driver_number: int | None = None,
+    now: datetime | None = None,
+):
+    """Return the highest speed-trap reading from OpenF1 qualifying or race."""
+    try:
+        best_packet = None
+        for session_name in ("Qualifying", "Race"):
+            session = fetch_session(
+                year,
+                country,
+                session_name=session_name,
+                location=location,
+                now=now,
+            )
+            if isinstance(session, str):
+                continue
+            packet = _max_trap_from_session(
+                session,
+                driver_number=driver_number,
+                session_name=session_name,
+            )
+            if packet is None:
+                continue
+            if best_packet is None or packet["speed_kmh"] > best_packet["speed_kmh"]:
+                best_packet = packet
+
+        if best_packet is None:
+            session = fetch_session(year, country, session_name="Race", location=location, now=now)
+            if isinstance(session, str):
+                return session
+            return "No speed-trap readings found for this Grand Prix."
+
+        return best_packet
 
     except Exception as e:
         return f"Historical Archive Error: {str(e)}"

@@ -9,6 +9,7 @@ DATA_DIR = "./data/historical_csvs"
 # Load ALL the CSVs into memory when the app starts
 try:
     races_df = pd.read_csv(os.path.join(DATA_DIR, "races.csv"))
+    circuits_df = pd.read_csv(os.path.join(DATA_DIR, "circuits.csv"))
     drivers_df = pd.read_csv(os.path.join(DATA_DIR, "drivers.csv"))
     constructors_df = pd.read_csv(os.path.join(DATA_DIR, "constructors.csv"))
     results_df = pd.read_csv(os.path.join(DATA_DIR, "results.csv"))
@@ -16,6 +17,7 @@ try:
     lap_times_df = pd.read_csv(os.path.join(DATA_DIR, "lap_times.csv"))
 except FileNotFoundError:
     print("Warning: Historical CSVs not found. Please run setup_historical_data.py first.")
+    circuits_df = None
     lap_times_df = None
 
 
@@ -333,6 +335,203 @@ def format_lap_time_delta(packet: dict) -> str:
     else:
         lines.append("Both drivers posted the same lap time on that lap.")
     return "\n".join(lines)
+
+
+def get_max_fastest_lap_speed(
+    year: int | None = None,
+    country: str | None = None,
+    location: str | None = None,
+    driver_ref: str | None = None,
+    year_start: int | None = None,
+    year_end: int | None = None,
+) -> dict | str:
+    """Return the highest fastestLapSpeed from results.csv for the given scope."""
+    try:
+        merged = results_df.merge(
+            races_df[["raceId", "year", "name"]].rename(columns={"name": "race_name"}),
+            on="raceId",
+        ).merge(
+            drivers_df[["driverId", "forename", "surname"]],
+            on="driverId",
+        )
+        merged["fastestLapSpeed"] = pd.to_numeric(merged["fastestLapSpeed"], errors="coerce")
+        merged = merged[merged["fastestLapSpeed"].notna()]
+
+        if driver_ref:
+            resolved = _resolve_driver(driver_ref)
+            if resolved is None:
+                return f"Could not find driver '{driver_ref}' in the historical database."
+            merged = merged[merged["driverId"] == resolved[0]]
+
+        if country:
+            if year is not None:
+                races_yr = _races_for_venue(year, country, location=location)
+            else:
+                keywords = csv_race_keywords(country, location)
+                if not keywords:
+                    return f"No races found matching '{country}'."
+                pattern = "|".join(re.escape(k) for k in keywords)
+                races_yr = races_df[races_df["name"].str.contains(pattern, case=False, na=False)]
+            if races_yr.empty:
+                label = location or country
+                return f"No races found matching '{label}'" + (f" in {year}." if year else ".")
+            if country in MULTI_GP_COUNTRIES and not location and len(races_yr) > 1:
+                return multi_gp_clarification(country)
+            merged = merged[merged["raceId"].isin(races_yr["raceId"])]
+        elif year is not None:
+            merged = merged[merged["year"] == year]
+        else:
+            if year_start is not None:
+                merged = merged[merged["year"] >= year_start]
+            if year_end is not None:
+                merged = merged[merged["year"] <= year_end]
+
+        if merged.empty:
+            return "No speed data found for those filters."
+
+        row = merged.loc[merged["fastestLapSpeed"].idxmax()]
+        return {
+            "measurement": "fastest lap speed (CSV)",
+            "speed_kmh": float(row["fastestLapSpeed"]),
+            "driver": f"{row['forename']} {row['surname']}",
+            "year": int(row["year"]),
+            "grand_prix": row["race_name"],
+        }
+    except Exception as e:
+        return f"Historical Database Error: {str(e)}"
+
+
+def format_top_speed_packet(packet: dict) -> str:
+    """Render one top-speed lookup packet as plain text."""
+    lines = [
+        f"{packet['speed_kmh']:.1f} km/h — {packet['driver']}",
+    ]
+    if packet.get("race"):
+        lines[0] += f" ({packet['race']})"
+    elif packet.get("year") and packet.get("grand_prix"):
+        lines[0] += f" ({packet['year']} {packet['grand_prix']})"
+    if packet.get("team"):
+        lines.append(f"Team: {packet['team']}.")
+    detail = packet.get("speed_field_label") or packet.get("measurement")
+    if packet.get("session"):
+        lines.append(f"Session: {packet['session']}.")
+    if packet.get("lap_number") is not None:
+        lines.append(
+            f"Recorded on lap {packet['lap_number']}"
+            + (f" at the {detail}" if detail else "")
+            + "."
+        )
+    elif detail:
+        lines.append(f"Metric: {detail}.")
+    return "\n".join(lines)
+
+
+def format_top_speed_lookup(
+    packets: list[dict],
+    *,
+    scope: str,
+    include_csv_note: bool = False,
+    csv_secondary: dict | None = None,
+) -> str:
+    """Render combined top-speed results."""
+    if not packets:
+        return "No speed data found for that query."
+
+    lines = [f"Top speed lookup ({scope}):", ""]
+    for packet in packets:
+        lines.append(f"- {format_top_speed_packet(packet)}")
+
+    if csv_secondary:
+        lines.extend(
+            [
+                "",
+                "For comparison, the highest CSV fastest-lap speed in the same scope is "
+                f"{csv_secondary['speed_kmh']:.1f} km/h ({csv_secondary['driver']}, "
+                f"{csv_secondary['year']} {csv_secondary['grand_prix']}). "
+                "That metric is the average speed on a driver's fastest lap, not the "
+                "peak speed-trap reading.",
+            ]
+        )
+    elif include_csv_note:
+        lines.extend(
+            [
+                "",
+                "Note: CSV fastestLapSpeed is the average speed on a driver's fastest lap "
+                "(typically ~240–260 km/h), not the peak speed-trap reading (often 330+ km/h). "
+                "Published speed-trap records and OpenF1 data are used when available.",
+            ]
+        )
+    return "\n".join(lines)
+
+
+def get_grand_prix_by_country(country: str) -> list[dict] | str:
+    """Return Grand Prix events held in a country from races.csv + circuits.csv."""
+    try:
+        if circuits_df is None:
+            return "Historical CSV data is not available."
+
+        merged = races_df.merge(
+            circuits_df[["circuitId", "location", "country"]],
+            on="circuitId",
+            how="inner",
+        )
+        country_races = merged[merged["country"].str.casefold() == country.casefold()].copy()
+        if country_races.empty:
+            return f"No Formula 1 Grands Prix found in {country} in the historical database."
+
+        grouped = (
+            country_races.groupby("name", sort=True)
+            .agg(
+                years=("year", lambda values: sorted({int(value) for value in values})),
+                location=("location", "first"),
+            )
+            .reset_index()
+        )
+
+        records: list[dict] = []
+        for row in grouped.itertuples(index=False):
+            years = list(row.years)
+            records.append(
+                {
+                    "grand_prix": row.name,
+                    "location": row.location,
+                    "years": years,
+                    "count": len(years),
+                    "first_year": years[0],
+                    "last_year": years[-1],
+                }
+            )
+        records.sort(key=lambda record: (record["last_year"], record["grand_prix"]), reverse=True)
+        return records
+    except Exception as e:
+        return f"Historical Database Error: {str(e)}"
+
+
+def format_country_grand_prix_listing(country: str) -> str:
+    """Render a readable list of GPs held in a country."""
+    result = get_grand_prix_by_country(country)
+    if isinstance(result, str):
+        return result
+
+    lines = [f"Formula 1 Grands Prix held in {country}:"]
+    for record in result:
+        years = record["years"]
+        if record["count"] == 1:
+            year_text = str(years[0])
+        elif record["count"] <= 4:
+            year_text = ", ".join(str(year) for year in years)
+        else:
+            year_text = f"{record['first_year']}–{record['last_year']} ({record['count']} seasons)"
+        lines.append(f"- {record['grand_prix']} ({record['location']}) — {year_text}")
+    lines.append(f"\nTotal: {sum(record['count'] for record in result)} race(s) across {len(result)} Grand Prix name(s).")
+    return "\n".join(lines)
+
+
+def format_country_grand_prix_listing_answer(query: str, countries: list[str]) -> str | None:
+    if not countries:
+        return None
+    sections = [format_country_grand_prix_listing(country) for country in countries]
+    return "\n\n".join(sections)
 
 
 def get_driver_teams(year: int, driver_ref: str) -> dict | str:

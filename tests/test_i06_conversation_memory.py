@@ -97,12 +97,14 @@ class TestI06ConversationMemory(unittest.TestCase):
                 "answer": "summary only",
             }
         ]
-        ctx = app._build_follow_up_lookup_context(
+        lookup = app._build_follow_up_lookup_context(
             "verify who finished second", history,
         )
-        self.assertIsNotNone(ctx)
+        self.assertIsNotNone(lookup)
+        ctx, source = lookup
         self.assertIn("FRESH LOOKUP DATA", ctx)
         self.assertIn("Monaco Grand Prix", ctx)
+        self.assertIn("Historical CSV", source.label)
 
     def test_try_follow_up_returns_none_when_lookup_unavailable(self):
         history = [

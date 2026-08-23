@@ -128,6 +128,8 @@ COUNTRY_SYNONYMS = {
     "usa": "United States",
     "america": "United States",
     "american": "United States",
+    "india": "India",
+    "indian": "India",
 }
 
 # Longer / more specific phrases win. Maps to (country, location).
@@ -339,3 +341,125 @@ def resolve_venue(
         return {"kind": "clarify", "message": multi_gp_clarification(canonical)}
 
     return {"kind": "ok", "country": canonical, "location": None}
+
+
+MULTI_GP_LISTING_HINTS = (
+    "what races",
+    "which races",
+    "what all races",
+    "which grand prix",
+    "what grand prix",
+    "which gps",
+    "what gps",
+    "grand prixs",
+    "grand prix",
+    "races are held",
+    "races held",
+    "race held",
+    "hosted in",
+    "held in",
+    "host in",
+    "races in",
+    "gps in",
+    "grands prix in",
+    "grand prix in",
+    "how many races",
+    "was there",
+    "were there",
+    "have there",
+    "ever held",
+)
+
+HISTORICAL_COUNTRY_LISTING_HINTS = (
+    "ever",
+    "was there",
+    "were there",
+    "have there",
+    "in history",
+    "historically",
+    "used to",
+    "any race",
+    "a race",
+)
+
+
+def countries_in_query(query: str) -> list[str]:
+    """Return canonical OpenF1 country names mentioned in free text."""
+    text = _normalize(query)
+    found: list[str] = []
+    seen: set[str] = set()
+
+    checks: list[tuple[str, str]] = []
+    for alias, country in COUNTRY_SYNONYMS.items():
+        checks.append((alias, country))
+    for country in sorted(CANONICAL_COUNTRIES):
+        checks.append((_normalize(country), country))
+
+    for alias, country in sorted(checks, key=lambda row: len(row[0]), reverse=True):
+        if country in seen:
+            continue
+        if _alias_in_text(alias, text):
+            found.append(country)
+            seen.add(country)
+    return found
+
+
+def is_country_race_listing_query(query: str) -> bool:
+    """True when the user asks which GPs are or were held in one or more countries."""
+    lowered = query.lower()
+    if not any(hint in lowered for hint in MULTI_GP_LISTING_HINTS):
+        return False
+    return bool(countries_in_query(query))
+
+
+def is_multi_gp_listing_query(query: str) -> bool:
+    """True when the user asks about the current multi-GP calendar for Italy/USA."""
+    if not is_country_race_listing_query(query):
+        return False
+    if uses_csv_country_race_listing(query):
+        return False
+    countries = countries_in_query(query)
+    return all(country in MULTI_GP_COUNTRIES for country in countries)
+
+
+def uses_csv_country_race_listing(query: str) -> bool:
+    """Use historical CSV when the query is not limited to the current multi-GP map."""
+    lowered = query.lower()
+    if any(hint in lowered for hint in HISTORICAL_COUNTRY_LISTING_HINTS):
+        return bool(countries_in_query(query))
+    countries = countries_in_query(query)
+    return any(country not in MULTI_GP_COUNTRIES for country in countries)
+
+
+def format_multi_gp_races(country: str) -> str:
+    """Render the Grand Prix list for a multi-GP country."""
+    races = MULTI_GP_COUNTRIES[country]
+    lines = "\n".join(f"- {name} ({location})" for name, location in races)
+    return f"{country} hosts {len(races)} Formula 1 Grands Prix:\n{lines}"
+
+
+def query_introduces_new_country(user_query: str, prior_answer: str) -> bool:
+    """True when the query names a country not covered by the previous answer."""
+    countries = countries_in_query(user_query)
+    if not countries:
+        return False
+    prior = prior_answer.lower()
+    for country in countries:
+        aliases = [country.lower(), *_country_aliases(country)]
+        if not any(alias in prior for alias in aliases):
+            return True
+    return False
+
+
+def _country_aliases(country: str) -> list[str]:
+    aliases = [alias for alias, mapped in COUNTRY_SYNONYMS.items() if mapped == country]
+    return aliases
+
+
+def format_multi_gp_listing_answer(query: str) -> str | None:
+    """Build an answer listing GPs for each multi-GP country mentioned."""
+    countries = [country for country in countries_in_query(query) if country in MULTI_GP_COUNTRIES]
+    if not countries:
+        return None
+    sections = [format_multi_gp_races(country) for country in countries]
+    return "\n\n".join(sections)
