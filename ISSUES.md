@@ -26,14 +26,14 @@ Living backlog. Add new items as we spot them during testing. Check them off as 
 - [x] **I07** (Medium) — Router misclassification risk → wrong knowledge base — `utils/router.py` — Ambiguous queries; invalid LLM output falls back to `"sporting"`.
 - [x] **I08** (Medium) — Country → GP name mismatches in CSV fallback — `utils/historical_db.py` — Mexico/Brazil naming; Miami/Las Vegas → United States can hit the wrong race.
 - [x] **I09** (Low) — Fastest-lap / lap packets expose raw seconds, not F1 `M:SS.mmm` — `utils/f1_api.py` — `format_lap_time` exists but isn’t used in return dicts.
-- [ ] **I10** (Low) — Extractor failure fallback omits `driver_name` — `utils/router.py`
+- [x] **I10** (Low) — Extractor failure fallback omits `driver_name` — `utils/router.py`
 
 ### Bugs / broken behavior
 
 - [x] **B01** (High) — Missing driver + specific lap still queries **#44** — `app.py` — `d_num = driver or 44`
 - [ ] **B02** (Medium) — Historical CSV fallback only runs if vector search **throws**; empty/irrelevant chunks still answer — `app.py` `_historical_context`
 - [x] **B03** (Medium) — `get_session_info` takes **first session** of weekend (often FP1), not Race — `utils/f1_api.py`
-- [ ] **B04** (Low) — If historical CSVs missing, module prints warning then **NameError** on use — `utils/historical_db.py`
+- [x] **B04** (Low) — If historical CSVs missing, module prints warning then **NameError** on use — `utils/historical_db.py`
 - [x] **B05** (Low) — Regulation PDF matcher is keyword-on-filename only — `pdf_processor.py` — Section A General never indexed.
 - [x] **B06** (Low) — HF Hub unauthenticated warning on startup — `utils/embeddings.py` — Set `HF_TOKEN` in `.env`; dotenv already wired.
 
@@ -80,6 +80,8 @@ Living backlog. Add new items as we spot them during testing. Check them off as 
 - [x] **I05** — 2026-08-21 — Driver-team career questions use CSV lookup via `get_driver_teams()` on `results.csv` (e.g. “Which team did Hamilton drive for in 2012?”) instead of RAG alone.
 - [x] **P02** — 2026-08-23 — Answers append a source footer (CSV file, OpenF1 endpoint, RAG document/chunk, or conversation memory).
 - [x] **B05** — 2026-08-23 — Regulation PDFs indexed by Section A–E / legacy filenames from `data/` and `data/archive/`, with article-aware chunking, `articles.json` exact lookup, and hybrid RAG search.
+- [x] **I10** — 2026-08-31 — `data/driver_numbers.json` maps OpenF1 grid names/acronyms/`#NN` to car numbers per season; `F1DriversDataset.csv` resolves 868 canonical driver names from query text; `utils/driver_numbers.py` enriches extractor output when the LLM fails or omits `driver_name`.
+- [x] **B04** — 2026-09-02 — Missing Ergast CSVs set all tables to `None`, `csv_available()` guards public lookups, and `app.py` returns a setup message instead of `NameError` for CSV-backed historical queries.
 
 ---
 

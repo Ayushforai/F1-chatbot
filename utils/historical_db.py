@@ -6,7 +6,20 @@ from utils.venues import csv_race_keywords, MULTI_GP_COUNTRIES, multi_gp_clarifi
 
 DATA_DIR = "./data/historical_csvs"
 
+CSV_UNAVAILABLE_MESSAGE = (
+    "Historical CSV database is not available. "
+    "Run: python setup_historical_data.py"
+)
+
 # Load ALL the CSVs into memory when the app starts
+races_df = None
+circuits_df = None
+drivers_df = None
+constructors_df = None
+results_df = None
+status_df = None
+lap_times_df = None
+
 try:
     races_df = pd.read_csv(os.path.join(DATA_DIR, "races.csv"))
     circuits_df = pd.read_csv(os.path.join(DATA_DIR, "circuits.csv"))
@@ -16,9 +29,28 @@ try:
     status_df = pd.read_csv(os.path.join(DATA_DIR, "status.csv"))
     lap_times_df = pd.read_csv(os.path.join(DATA_DIR, "lap_times.csv"))
 except FileNotFoundError:
-    print("Warning: Historical CSVs not found. Please run setup_historical_data.py first.")
-    circuits_df = None
-    lap_times_df = None
+    print(f"Warning: {CSV_UNAVAILABLE_MESSAGE}")
+
+
+def csv_available() -> bool:
+    """True when the core Ergast CSV tables loaded successfully."""
+    return all(
+        frame is not None
+        for frame in (
+            races_df,
+            circuits_df,
+            drivers_df,
+            constructors_df,
+            results_df,
+            status_df,
+        )
+    )
+
+
+def _require_csv() -> str | None:
+    if csv_available():
+        return None
+    return CSV_UNAVAILABLE_MESSAGE
 
 
 def _cell(value) -> str:
@@ -29,6 +61,9 @@ def _cell(value) -> str:
 
 def _races_for_venue(year: int, country: str, location: str | None = None) -> pd.DataFrame:
     """Return CSV race rows for a year/country, aggregating all venues when needed."""
+    if races_df is None:
+        return pd.DataFrame()
+
     races_yr = races_df[races_df["year"] == year]
     if not country:
         return races_yr
@@ -49,6 +84,10 @@ def _races_for_venue(year: int, country: str, location: str | None = None) -> pd
 
 def get_race_results(year: int, country: str, top_n: int | None = None, location: str | None = None) -> dict | str:
     """Return the full race classification, including DNFs and each driver's fastest lap."""
+    missing = _require_csv()
+    if missing:
+        return missing
+
     try:
         races_yr = _races_for_venue(year, country, location=location)
 
@@ -186,6 +225,8 @@ def format_race_classification(packet: dict) -> str:
 
 
 def _resolve_driver(driver_ref: str) -> tuple[int, str] | None:
+    if drivers_df is None:
+        return None
     if not driver_ref or not str(driver_ref).strip():
         return None
     ref = str(driver_ref).strip()
@@ -254,9 +295,13 @@ def get_lap_time_delta(
     location: str | None = None,
 ) -> dict | str:
     """Return lap-time comparison for two drivers on a specific lap."""
+    missing = _require_csv()
+    if missing:
+        return missing
+
     try:
         if lap_times_df is None:
-            return "Historical lap-time data is not available. Run setup_historical_data.py first."
+            return CSV_UNAVAILABLE_MESSAGE
 
         race = _resolve_race(year, country, location=location)
         if isinstance(race, str):
@@ -346,6 +391,10 @@ def get_max_fastest_lap_speed(
     year_end: int | None = None,
 ) -> dict | str:
     """Return the highest fastestLapSpeed from results.csv for the given scope."""
+    missing = _require_csv()
+    if missing:
+        return missing
+
     try:
         merged = results_df.merge(
             races_df[["raceId", "year", "name"]].rename(columns={"name": "race_name"}),
@@ -466,10 +515,11 @@ def format_top_speed_lookup(
 
 def get_grand_prix_by_country(country: str) -> list[dict] | str:
     """Return Grand Prix events held in a country from races.csv + circuits.csv."""
-    try:
-        if circuits_df is None:
-            return "Historical CSV data is not available."
+    missing = _require_csv()
+    if missing:
+        return missing
 
+    try:
         merged = races_df.merge(
             circuits_df[["circuitId", "location", "country"]],
             on="circuitId",
@@ -536,6 +586,10 @@ def format_country_grand_prix_listing_answer(query: str, countries: list[str]) -
 
 def get_driver_teams(year: int, driver_ref: str) -> dict | str:
     """Return the team(s) a driver raced for in a given season."""
+    missing = _require_csv()
+    if missing:
+        return missing
+
     try:
         resolved = _resolve_driver(driver_ref)
         if resolved is None:
@@ -607,6 +661,10 @@ def format_driver_teams(packet: dict) -> str:
 
 def get_historical_driver_info(year: int, driver_ref: str, country: str = None, location: str | None = None):
     """Return a driver's result plus the full race classification for that event."""
+    missing = _require_csv()
+    if missing:
+        return missing
+
     try:
         # Always fetch the full race results for rich context
         race_data = get_race_results(year, country, location=location)

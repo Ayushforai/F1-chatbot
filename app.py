@@ -11,6 +11,7 @@ import re
 from datetime import datetime
 
 import ollama
+from utils.driver_numbers import enrich_telemetry_params
 from utils.router import (
     ambiguous_query_response,
     extract_telemetry_params,
@@ -45,6 +46,8 @@ from utils.citations import (
     venue_label,
 )
 from utils.historical_db import (
+    CSV_UNAVAILABLE_MESSAGE,
+    csv_available,
     format_country_grand_prix_listing_answer,
     format_driver_teams,
     format_lap_time_delta,
@@ -90,6 +93,19 @@ MISSING_DRIVER_MESSAGE = (
     "(for example Hamilton or Verstappen) or a car number "
     "(for example #44 or #1) so I can look up the right data."
 )
+
+
+def _respond_historical_csv_unavailable(
+    conversation_history: list[dict],
+    user_query: str,
+) -> None:
+    """Tell the user how to install historical CSV data."""
+    _respond_and_remember(
+        conversation_history,
+        user_query,
+        "historical",
+        CSV_UNAVAILABLE_MESSAGE,
+    )
 
 
 def query_needs_year(params: dict, user_query: str = "") -> bool:
@@ -225,6 +241,9 @@ def _apply_pending_year_clarification(user_query: str, pending: dict) -> dict:
 
 def _format_race_results_response(user_query: str, history: list[dict], year: int) -> str:
     """Look up and format full race results for the given year."""
+    if not csv_available():
+        return CSV_UNAVAILABLE_MESSAGE
+
     venue = resolve_venue(query=user_query)
     if venue["kind"] == "clarify":
         return venue["message"]
@@ -449,6 +468,9 @@ def _try_lap_comparison_lookup(user_query: str, history: list[dict]) -> str | No
     """Answer lap-time delta questions from lap_times.csv when possible."""
     if not _is_lap_comparison_query(user_query):
         return None
+
+    if not csv_available():
+        return CSV_UNAVAILABLE_MESSAGE
 
     lap_number = _lap_number_from_query(user_query)
     drivers = _extract_two_drivers(user_query)
@@ -834,6 +856,7 @@ def resolve_quantitative_query(params: dict, user_query: str = "") -> dict:
     required but missing, ``{"kind": "error", "message": str}`` for known
     failures, or ``{"kind": "context", "context": str}`` for the LLM.
     """
+    params = enrich_telemetry_params(params, user_query, year=params.get("year"))
     q_type = params.get("query_type")
     driver = params.get("driver_number")
     year = params.get("year")
@@ -1285,6 +1308,9 @@ def _handle_country_race_listing_query(conversation_history: list[dict], user_qu
 
     countries = countries_in_query(user_query)
     if uses_csv_country_race_listing(user_query):
+        if not csv_available():
+            _respond_historical_csv_unavailable(conversation_history, user_query)
+            return True
         answer = format_country_grand_prix_listing_answer(user_query, countries)
         if answer is None:
             return False
@@ -1317,6 +1343,10 @@ def _handle_driver_team_query(conversation_history: list[dict], user_query: str)
     """Answer driver-team career questions from CSV. Returns True if handled."""
     if not _is_driver_team_query(user_query):
         return False
+
+    if not csv_available():
+        _respond_historical_csv_unavailable(conversation_history, user_query)
+        return True
 
     year_result = resolve_driver_team_year(user_query, conversation_history)
     if year_result["kind"] == "clarify":
@@ -1408,12 +1438,25 @@ def _csv_historical_record(
 
 def _historical_context(user_query: str, history: list[dict]) -> tuple[str, SourceCitation | None]:
     if _is_driver_team_query(user_query):
+        if not csv_available():
+            return CSV_UNAVAILABLE_MESSAGE, None
         year_result = resolve_driver_team_year(user_query, history)
         if year_result["kind"] == "ok":
             year = year_result["year"]
             answer = _lookup_driver_teams(user_query, year)
             print(" [CSV] Using driver-team lookup...")
             return answer, csv_driver_teams(year=year)
+
+    if not csv_available():
+        if _is_race_results_query(user_query):
+            return CSV_UNAVAILABLE_MESSAGE, None
+        try:
+            print(" [RAG] Searching historical vector store...")
+            chunks, metadata = search_with_metadata("historical", user_query, k=5)
+            source = citation_from_historical_metadata(metadata)
+            return "\n\n".join(chunks), source
+        except Exception as e:
+            return f"{CSV_UNAVAILABLE_MESSAGE} (RAG fallback also failed: {e})", None
 
     try:
         csv_record = _csv_historical_record(user_query, history)
@@ -1979,6 +2022,18 @@ def main():
             source = result.get("source")
 
         elif category == "historical":
+            if not csv_available() and (
+                _is_race_results_query(user_query)
+                or _is_driver_team_query(user_query)
+                or _is_lap_comparison_query(user_query)
+                or (
+                    is_country_race_listing_query(user_query)
+                    and uses_csv_country_race_listing(user_query)
+                )
+            ):
+                _respond_historical_csv_unavailable(conversation_history, user_query)
+                continue
+
             pending_kind = "historical_race" if _is_race_results_query(user_query) else "historical"
             if _maybe_ask_for_venue(
                 conversation_history,

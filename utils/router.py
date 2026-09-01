@@ -2,6 +2,7 @@ import json
 import re
 import ollama
 
+from utils.driver_numbers import enrich_telemetry_params
 from utils.venues import resolve_venue
 
 MODEL_NAME = "qwen2.5:7b-instruct-q8_0"
@@ -310,9 +311,9 @@ def extract_telemetry_params(user_query: str, history: list[dict] = None) -> dic
             raw_text = re.sub(r"^```(?:json)?\n?", "", raw_text)
             raw_text = re.sub(r"\n?```$", "", raw_text).strip()
 
-        return json.loads(raw_text)
+        params = json.loads(raw_text)
     except Exception:
-        return {
+        params = {
             "query_type": "live_telemetry",
             "driver_number": None,
             "driver_name": None,
@@ -321,3 +322,5 @@ def extract_telemetry_params(user_query: str, history: list[dict] = None) -> dic
             "location": None,
             "lap_number": None,
         }
+
+    return enrich_telemetry_params(params, user_query)

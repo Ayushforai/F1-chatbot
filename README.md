@@ -10,6 +10,7 @@ A hybrid Formula 1 assistant that routes questions to the right data source: liv
 - **Year clarification** — race, lap, and driver-team lookups ask for a season before defaulting to 2026
 - **Venue clarification** — multi-GP countries (e.g. Italy, USA) prompt for the specific circuit (Monza vs Imola, Austin vs Miami vs Las Vegas)
 - **Driver clarification** — lap and telemetry queries require a named driver; no silent default to Hamilton
+- **Driver number lookup** — names, surnames, and `#NN` tokens map to car numbers via `data/driver_numbers.json` (OpenF1 grid). `F1DriversDataset.csv` helps recognize 868 canonical driver names in query text before number lookup.
 
 ### Live & quantitative data
 - **OpenF1 integration** — fastest lap, specific-lap lookups, and live telemetry when a session is actually live
@@ -61,6 +62,9 @@ python pdf_processor.py
 # Download historical CSVs if not already present, then build the FAISS index
 python setup_historical_data.py
 python historical_processor.py
+
+# Refresh OpenF1 driver name → car number grid (used for live/lap lookups)
+python setup_driver_numbers.py
 ```
 
 ## Usage
@@ -108,8 +112,15 @@ app.py                  # Main chat loop, clarification flows, memory
 pdf_processor.py        # Builds FAISS indexes from FIA PDFs
 historical_processor.py # Builds FAISS index from historical CSVs
 setup_historical_data.py # Downloads Kaggle historical dataset
+setup_driver_numbers.py # Fetches OpenF1 driver grid → data/driver_numbers.json
+data/
+  driver_numbers.json   # Name / acronym / #NN → car number per season (OpenF1)
+  historical_csvs/
+    F1DriversDataset.csv # Canonical driver names for text matching (no car numbers)
 utils/
   router.py             # Intent classification + parameter extraction
+  driver_names.py       # F1DriversDataset name resolution
+  driver_numbers.py     # Driver name → car number resolution
   f1_api.py             # OpenF1 API client + lap time formatting
   historical_db.py      # CSV lookups: race results, driver teams, lap deltas
   venues.py             # Circuit/country resolution + multi-GP clarification
