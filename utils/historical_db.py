@@ -1,6 +1,7 @@
 import pandas as pd
 import os
 import re
+from datetime import datetime, timezone
 
 from utils.venues import csv_race_keywords, MULTI_GP_COUNTRIES, multi_gp_clarification
 
@@ -84,6 +85,12 @@ def _races_for_venue(year: int, country: str, location: str | None = None) -> pd
 
 def get_race_results(year: int, country: str, top_n: int | None = None, location: str | None = None) -> dict | str:
     """Return the full race classification, including DNFs and each driver's fastest lap."""
+    from utils.race_schedule import (
+        RACE_NOT_HELD_RESULTS_MESSAGE,
+        _parse_race_date,
+        race_results_unavailable_reason,
+    )
+
     missing = _require_csv()
     if missing:
         return missing
@@ -92,10 +99,21 @@ def get_race_results(year: int, country: str, top_n: int | None = None, location
         races_yr = _races_for_venue(year, country, location=location)
 
         if races_yr.empty:
+            unavailable = race_results_unavailable_reason(year, country, location=location)
+            if unavailable:
+                return unavailable
             return f"No races found for {year}" + (f" matching '{country}'." if country else ".")
 
         if country in MULTI_GP_COUNTRIES and not location and len(races_yr) > 1:
             return multi_gp_clarification(country)
+
+        race_date = _parse_race_date(races_yr.iloc[0].get("date"))
+        if race_date and race_date > datetime.now(timezone.utc).date():
+            return RACE_NOT_HELD_RESULTS_MESSAGE
+
+        unavailable = race_results_unavailable_reason(year, country, location=location)
+        if unavailable:
+            return unavailable
 
         race_id = races_yr.iloc[0]['raceId']
         race_name = races_yr.iloc[0]['name']

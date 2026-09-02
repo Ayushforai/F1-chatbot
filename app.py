@@ -12,6 +12,7 @@ from datetime import datetime
 
 import ollama
 from utils.driver_numbers import enrich_telemetry_params
+from utils.race_schedule import RACE_NOT_HELD_RESULTS_MESSAGE, race_results_unavailable_reason
 from utils.router import (
     ambiguous_query_response,
     extract_telemetry_params,
@@ -248,6 +249,15 @@ def _format_race_results_response(user_query: str, history: list[dict], year: in
     if venue["kind"] == "clarify":
         return venue["message"]
 
+    if venue["kind"] == "ok":
+        unavailable = race_results_unavailable_reason(
+            year,
+            venue["country"],
+            venue.get("location"),
+        )
+        if unavailable:
+            return unavailable
+
     context = _csv_historical_record(user_query, history, year=year)
     if context and is_multi_gp_clarification(context):
         return context
@@ -257,6 +267,66 @@ def _format_race_results_response(user_query: str, history: list[dict], year: in
         f"No race results found in the historical CSV database for "
         f"{year}. Check the Grand Prix name or year and try again."
     )
+
+
+def _handle_race_results_query(conversation_history: list[dict], user_query: str) -> bool:
+    """Answer full race-result queries from CSV when the event has already been held."""
+    if not _is_race_results_query(user_query):
+        return False
+
+    if _maybe_ask_for_venue(
+        conversation_history,
+        user_query,
+        "historical",
+        "historical_race",
+    ):
+        return True
+
+    year_result = resolve_race_results_year(user_query, conversation_history)
+    if year_result["kind"] == "clarify":
+        message = year_result["message"]
+        print(f"\nResponse:\n{message}\n")
+        print("-" * 50)
+        _save_conversation_turn(
+            conversation_history,
+            {
+                **_prompt_for_year(
+                    user_query,
+                    "historical",
+                    "historical_race",
+                    pending_query=user_query,
+                ),
+                "answer": message,
+            },
+        )
+        return True
+
+    year = year_result["year"]
+    print(f" [CSV] Looking up {year} race classification...")
+    answer = _format_race_results_response(user_query, conversation_history, year)
+    if is_multi_gp_clarification(answer):
+        _maybe_ask_for_venue(
+            conversation_history,
+            user_query,
+            "historical",
+            "historical_race",
+            answer,
+            year=year,
+        )
+        return True
+
+    _respond_and_remember(
+        conversation_history,
+        user_query,
+        "historical",
+        answer,
+        source=_csv_race_citation_from_query(user_query, year)
+        if answer != RACE_NOT_HELD_RESULTS_MESSAGE and csv_available()
+        else None,
+        year=year,
+        race_lookup_query=user_query,
+    )
+    return True
 
 
 def _prompt_for_venue(user_query: str, category: str, pending_kind: str, **pending_extra) -> dict:
@@ -931,6 +1001,15 @@ def generate_f1_response(
         "Never stop at the top 10. Never omit DNF/R entries. Never add retirements that are not in the list.\n"
         "6. If RECENT CONVERSATION is provided, use it to interpret follow-up questions.\n"
         f"7. {get_currency_prompt_rules()}\n"
+        "FORMAT RULES:\n"
+        "- Never write one dense paragraph. Separate distinct facts with a blank line.\n"
+        "- Start with a markdown heading, e.g. ## 2026 Cost Cap.\n"
+        "- Use ### for sub-topics such as Power Unit, homologation, or conditions.\n"
+        "- Bold the actual answer values with **double asterisks**: money amounts, "
+        "currency conversions, article numbers, lap times, positions, and named results.\n"
+        "- Use markdown lists (- or 1.) for multiple limits, conditions, or race results. "
+        "Indent nested details.\n"
+        "- Keep body sentences short. Put each cap figure or condition in its own paragraph or list item.\n"
     )
     if regulation_year is not None:
         system_prompt += (
@@ -1742,7 +1821,8 @@ def _rag_warmup_categories() -> list[str] | None:
     return [part.strip() for part in raw.split(",") if part.strip()]
 
 
-def main():
+def initialize_pipeline() -> None:
+    """Load FX rates and warm the embedding model once per process."""
     print("Initializing Hybrid F1 Race Engineer Pipeline...")
     rates = refresh_exchange_rates()
     if rates["source"].startswith("live"):
@@ -1758,6 +1838,369 @@ def main():
     print(" [RAG] Loading embedding model into memory...")
     warmup_rag(categories=_rag_warmup_categories())
     print(" [RAG] Embedding model ready.")
+
+
+def current_response(history: list[dict]) -> dict:
+    """Serialize the latest turn for the CLI or HTTP API."""
+    last = history[-1] if history else {}
+    answer = last.get("answer") or ""
+    body, citation = _split_citation(answer)
+    return {
+        "answer": answer,
+        "body": body,
+        "citation": citation,
+        "category": last.get("category") or "",
+        "awaiting_year": bool(last.get("awaiting_year")),
+        "awaiting_venue": bool(last.get("awaiting_venue")),
+    }
+
+
+def _split_citation(answer: str) -> tuple[str, str | None]:
+    marker = "\n\n— Source: "
+    if marker not in answer:
+        return answer, None
+    body, source = answer.rsplit(marker, 1)
+    return body, source.strip()
+
+
+def _error_response(message: str) -> dict:
+    return {
+        "answer": message,
+        "body": message,
+        "citation": None,
+        "category": "error",
+        "awaiting_year": False,
+        "awaiting_venue": False,
+    }
+
+
+def process_query(conversation_history: list[dict], user_query: str) -> dict | None:
+    """Handle one user turn. Returns the serialized assistant response, or None if skipped."""
+    awaiting_year = conversation_history and conversation_history[-1].get("awaiting_year")
+    awaiting_venue = conversation_history and conversation_history[-1].get("awaiting_venue")
+    if not user_query and not awaiting_year and not awaiting_venue:
+        return None
+
+    history_extra: dict = {}
+
+    if awaiting_venue and not _should_abandon_venue_clarification(user_query):
+        _handle_venue_clarification_resume(conversation_history, user_query)
+        return current_response(conversation_history)
+
+    if not awaiting_year and not awaiting_venue and _respond_lap_comparison(conversation_history, user_query):
+        return current_response(conversation_history)
+
+    if not awaiting_year and not awaiting_venue and _handle_top_speed_query(conversation_history, user_query):
+        return current_response(conversation_history)
+
+    if not awaiting_year and not awaiting_venue and _handle_driver_team_query(conversation_history, user_query):
+        return current_response(conversation_history)
+
+    if not awaiting_year and not awaiting_venue and _handle_country_race_listing_query(
+        conversation_history, user_query
+    ):
+        return current_response(conversation_history)
+
+    if not awaiting_year and not awaiting_venue and _handle_race_results_query(
+        conversation_history, user_query
+    ):
+        return current_response(conversation_history)
+
+    if (
+        not awaiting_year
+        and not awaiting_venue
+        and (ambiguous_answer := get_ambiguous_query_response(user_query, conversation_history))
+    ):
+        print(" [Router] Query too ambiguous — prompting for specificity")
+        _respond_and_remember(
+            conversation_history,
+            user_query,
+            "help",
+            ambiguous_answer,
+        )
+        return current_response(conversation_history)
+
+    if (
+        not awaiting_year
+        and not awaiting_venue
+        and (follow_up := _try_answer_follow_up(user_query, conversation_history))
+    ):
+        print(f" [Router] Intent isolated to: {follow_up['category'].upper()}")
+        _respond_and_remember(
+            conversation_history,
+            user_query,
+            follow_up["category"],
+            follow_up["answer"],
+            source=follow_up.get("source"),
+            **{k: v for k, v in follow_up.items() if k not in ("category", "answer", "source")},
+        )
+        return current_response(conversation_history)
+
+    # 1. Routing Layer (with conversation context)
+    if awaiting_year and not _should_abandon_year_clarification(user_query):
+        pending = conversation_history[-1]
+        pending_kind = pending.get("pending_kind", "quantitative")
+        category = pending.get("category", "quantitative")
+        year = _resolve_pending_year(user_query)
+        history_extra["year"] = year
+
+        if pending_kind == "historical_race":
+            print(" [Router] Resuming race-results query after year clarification")
+            original_query = pending["pending_query"]
+            if _maybe_ask_for_venue(
+                conversation_history,
+                original_query,
+                category,
+                "historical_race",
+                year=year,
+            ):
+                return current_response(conversation_history)
+            print(f" [CSV] Looking up {year} race classification...")
+            answer = _format_race_results_response(original_query, conversation_history, year)
+            if is_multi_gp_clarification(answer):
+                _ask_for_venue_clarification(
+                    conversation_history,
+                    user_query,
+                    category,
+                    "historical_race",
+                    answer,
+                    year=year,
+                )
+                return current_response(conversation_history)
+            _respond_and_remember(
+                conversation_history, user_query, "historical", answer,
+                source=_csv_race_citation_from_query(original_query, year),
+                year=year, race_lookup_query=original_query,
+            )
+            return current_response(conversation_history)
+
+        if pending_kind == "driver_team":
+            print(" [Router] Resuming driver-team query after year clarification")
+            original_query = pending["pending_query"]
+            driver_ref = _driver_ref_from_team_query(original_query, conversation_history)
+            if not driver_ref:
+                _respond_and_remember(
+                    conversation_history,
+                    user_query,
+                    category,
+                    MISSING_DRIVER_MESSAGE,
+                )
+                return current_response(conversation_history)
+            answer = _lookup_driver_teams(original_query, year)
+            _respond_and_remember(
+                conversation_history,
+                user_query,
+                category,
+                answer,
+                source=csv_driver_teams(year=year),
+                year=year,
+                driver_lookup_query=original_query,
+            )
+            return current_response(conversation_history)
+
+        if pending_kind == "top_speed":
+            print(" [Router] Resuming top-speed query after year clarification")
+            original_query = pending["pending_query"]
+            answer, source, extra = _lookup_top_speed(
+                original_query,
+                conversation_history,
+                year=year,
+            )
+            _respond_and_remember(
+                conversation_history,
+                user_query,
+                category,
+                answer,
+                source=source,
+                year=year,
+                **extra,
+            )
+            return current_response(conversation_history)
+
+        if pending_kind == "regulations":
+            print(" [Router] Resuming regulations query after year clarification")
+            original_query = pending["pending_query"]
+            try:
+                context, source = _regulations_rag_context(category, original_query, year)
+            except FileNotFoundError as e:
+                print(f" [Error] {e}\n")
+                return _error_response(str(e))
+            answer = generate_f1_response(
+                original_query,
+                context,
+                history=conversation_history,
+                regulation_year=year,
+            )
+            _respond_and_remember(
+                conversation_history,
+                user_query,
+                category,
+                answer,
+                source=source,
+                year=year,
+                pending_query=original_query,
+            )
+            return current_response(conversation_history)
+
+        print(" [Router] Resuming quantitative query after year clarification")
+        params = _apply_pending_year_clarification(user_query, pending)
+        print(f" [Debug] Resumed query after year clarification: {params}")
+        result = resolve_quantitative_query(params, user_query=user_query)
+        if result["kind"] == "clarify" and is_multi_gp_clarification(result["message"]):
+            _ask_for_venue_clarification(
+                conversation_history,
+                user_query,
+                category,
+                "quantitative",
+                result["message"],
+                pending_params=params,
+            )
+            return current_response(conversation_history)
+        if result["kind"] in ("clarify", "error"):
+            _respond_and_remember(
+                conversation_history, user_query, category, result["message"],
+            )
+            return current_response(conversation_history)
+        answer = generate_f1_response(
+            user_query, result["context"], history=conversation_history,
+        )
+        _respond_and_remember(
+            conversation_history, user_query, category, answer,
+            source=result.get("source"),
+            year=year, lookup_params=params,
+        )
+        return current_response(conversation_history)
+
+    category = route_query(user_query, history=conversation_history)
+    print(f" [Router] Intent isolated to: {category.upper()}")
+
+    if category == "ambiguous":
+        answer = get_ambiguous_query_response(user_query, conversation_history) or ambiguous_query_response(user_query)
+        _respond_and_remember(
+            conversation_history,
+            user_query,
+            "help",
+            answer,
+        )
+        return current_response(conversation_history)
+
+    if not awaiting_year and not awaiting_venue and _respond_lap_comparison(conversation_history, user_query):
+        return current_response(conversation_history)
+
+    # 2. Branching Execution Paths
+    offer_other_year = False
+    reg_year: int | None = None
+    source: SourceCitation | None = None
+    context = ""
+
+    if category == "quantitative":
+        print(" [Extractor] Processing query context via Qwen...")
+        params = extract_telemetry_params(user_query, history=conversation_history)
+
+        print(f" [Debug] Qwen Extracted JSON: {params}")
+
+        year_result = resolve_query_year(user_query, params, conversation_history)
+        if year_result["kind"] == "clarify":
+            message = year_result["message"]
+            print(f"\nResponse:\n{message}\n")
+            print("-" * 50)
+            _save_conversation_turn(
+                conversation_history,
+                {
+                    **_prompt_for_year(
+                        user_query, category, "quantitative", pending_params=params,
+                    ),
+                    "answer": message,
+                },
+            )
+            return current_response(conversation_history)
+
+        params["year"] = year_result["year"]
+        history_extra["year"] = params["year"]
+        result = resolve_quantitative_query(params, user_query=user_query)
+        if result["kind"] == "clarify" and is_multi_gp_clarification(result["message"]):
+            _ask_for_venue_clarification(
+                conversation_history,
+                user_query,
+                category,
+                "quantitative",
+                result["message"],
+                pending_params=params,
+            )
+            return current_response(conversation_history)
+        if result["kind"] in ("clarify", "error"):
+            _respond_and_remember(
+                conversation_history, user_query, category, result["message"],
+            )
+            return current_response(conversation_history)
+        context = result["context"]
+        source = result.get("source")
+
+    elif category == "historical":
+        if not csv_available() and (
+            _is_race_results_query(user_query)
+            or _is_driver_team_query(user_query)
+            or _is_lap_comparison_query(user_query)
+            or (
+                is_country_race_listing_query(user_query)
+                and uses_csv_country_race_listing(user_query)
+            )
+        ):
+            _respond_historical_csv_unavailable(conversation_history, user_query)
+            return current_response(conversation_history)
+
+        pending_kind = "historical_race" if _is_race_results_query(user_query) else "historical"
+        if _maybe_ask_for_venue(
+            conversation_history,
+            user_query,
+            category,
+            pending_kind,
+        ):
+            return current_response(conversation_history)
+
+        if _is_race_results_query(user_query):
+            if _handle_race_results_query(conversation_history, user_query):
+                return current_response(conversation_history)
+
+        print(" [History] Resolving race results...")
+        context, source = _historical_context(user_query, conversation_history)
+
+    else:
+        reg_year = _explicit_year(user_query)
+        offer_other_year = reg_year is None
+        if reg_year is None:
+            reg_year = current_regulations_year()
+        history_extra["year"] = reg_year
+        try:
+            context, source = _regulations_rag_context(category, user_query, reg_year)
+        except FileNotFoundError as e:
+            print(f" [Error] {e}\n")
+            return _error_response(str(e))
+
+    # 3. Text Generation
+    reg_answer_year = history_extra.get("year") if category in REGULATION_CATEGORIES else None
+    answer = generate_f1_response(
+        user_query,
+        context,
+        history=conversation_history,
+        regulation_year=reg_answer_year,
+    )
+    extra = dict(history_extra)
+    if category == "quantitative":
+        extra["lookup_params"] = params
+    if category in REGULATION_CATEGORIES and offer_other_year:
+        answer += _regulations_year_offer(reg_year)
+        extra["awaiting_year"] = True
+        extra["pending_kind"] = "regulations"
+        extra["pending_query"] = user_query
+    _respond_and_remember(
+        conversation_history, user_query, category, answer, source=source, **extra,
+    )
+    return current_response(conversation_history)
+
+
+def main():
+    initialize_pipeline()
     print(f"\nPit Wall Active [Model: {MODEL_NAME}]. Type 'exit' to close telemetry link.\n")
 
     conversation_history = []
@@ -1766,347 +2209,7 @@ def main():
         user_query = read_user_query("Engineer Query > ")
         if user_query.lower() in ['exit', 'quit']:
             break
-        awaiting_year = conversation_history and conversation_history[-1].get("awaiting_year")
-        awaiting_venue = conversation_history and conversation_history[-1].get("awaiting_venue")
-        if not user_query and not awaiting_year and not awaiting_venue:
-            continue
-
-        history_extra: dict = {}
-
-        if awaiting_venue and not _should_abandon_venue_clarification(user_query):
-            _handle_venue_clarification_resume(conversation_history, user_query)
-            continue
-
-        if not awaiting_year and not awaiting_venue and _respond_lap_comparison(conversation_history, user_query):
-            continue
-
-        if not awaiting_year and not awaiting_venue and _handle_top_speed_query(conversation_history, user_query):
-            continue
-
-        if not awaiting_year and not awaiting_venue and _handle_driver_team_query(conversation_history, user_query):
-            continue
-
-        if not awaiting_year and not awaiting_venue and _handle_country_race_listing_query(
-            conversation_history, user_query
-        ):
-            continue
-
-        if (
-            not awaiting_year
-            and not awaiting_venue
-            and (ambiguous_answer := get_ambiguous_query_response(user_query, conversation_history))
-        ):
-            print(" [Router] Query too ambiguous — prompting for specificity")
-            _respond_and_remember(
-                conversation_history,
-                user_query,
-                "help",
-                ambiguous_answer,
-            )
-            continue
-
-        if (
-            not awaiting_year
-            and not awaiting_venue
-            and (follow_up := _try_answer_follow_up(user_query, conversation_history))
-        ):
-            print(f" [Router] Intent isolated to: {follow_up['category'].upper()}")
-            _respond_and_remember(
-                conversation_history,
-                user_query,
-                follow_up["category"],
-                follow_up["answer"],
-                source=follow_up.get("source"),
-                **{k: v for k, v in follow_up.items() if k not in ("category", "answer", "source")},
-            )
-            continue
-
-        # 1. Routing Layer (with conversation context)
-        if awaiting_year and not _should_abandon_year_clarification(user_query):
-            pending = conversation_history[-1]
-            pending_kind = pending.get("pending_kind", "quantitative")
-            category = pending.get("category", "quantitative")
-            year = _resolve_pending_year(user_query)
-            history_extra["year"] = year
-
-            if pending_kind == "historical_race":
-                print(" [Router] Resuming race-results query after year clarification")
-                original_query = pending["pending_query"]
-                if _maybe_ask_for_venue(
-                    conversation_history,
-                    original_query,
-                    category,
-                    "historical_race",
-                    year=year,
-                ):
-                    continue
-                print(f" [CSV] Looking up {year} race classification...")
-                answer = _format_race_results_response(original_query, conversation_history, year)
-                if is_multi_gp_clarification(answer):
-                    _ask_for_venue_clarification(
-                        conversation_history,
-                        user_query,
-                        category,
-                        "historical_race",
-                        answer,
-                        year=year,
-                    )
-                    continue
-                _respond_and_remember(
-                    conversation_history, user_query, "historical", answer,
-                    source=_csv_race_citation_from_query(original_query, year),
-                    year=year, race_lookup_query=original_query,
-                )
-                continue
-
-            if pending_kind == "driver_team":
-                print(" [Router] Resuming driver-team query after year clarification")
-                original_query = pending["pending_query"]
-                driver_ref = _driver_ref_from_team_query(original_query, conversation_history)
-                if not driver_ref:
-                    _respond_and_remember(
-                        conversation_history,
-                        user_query,
-                        category,
-                        MISSING_DRIVER_MESSAGE,
-                    )
-                    continue
-                answer = _lookup_driver_teams(original_query, year)
-                _respond_and_remember(
-                    conversation_history,
-                    user_query,
-                    category,
-                    answer,
-                    source=csv_driver_teams(year=year),
-                    year=year,
-                    driver_lookup_query=original_query,
-                )
-                continue
-
-            if pending_kind == "top_speed":
-                print(" [Router] Resuming top-speed query after year clarification")
-                original_query = pending["pending_query"]
-                answer, source, extra = _lookup_top_speed(
-                    original_query,
-                    conversation_history,
-                    year=year,
-                )
-                _respond_and_remember(
-                    conversation_history,
-                    user_query,
-                    category,
-                    answer,
-                    source=source,
-                    year=year,
-                    **extra,
-                )
-                continue
-
-            if pending_kind == "regulations":
-                print(" [Router] Resuming regulations query after year clarification")
-                original_query = pending["pending_query"]
-                try:
-                    context, source = _regulations_rag_context(category, original_query, year)
-                except FileNotFoundError as e:
-                    print(f" [Error] {e}\n")
-                    continue
-                answer = generate_f1_response(
-                    original_query,
-                    context,
-                    history=conversation_history,
-                    regulation_year=year,
-                )
-                _respond_and_remember(
-                    conversation_history,
-                    user_query,
-                    category,
-                    answer,
-                    source=source,
-                    year=year,
-                    pending_query=original_query,
-                )
-                continue
-
-            print(" [Router] Resuming quantitative query after year clarification")
-            params = _apply_pending_year_clarification(user_query, pending)
-            print(f" [Debug] Resumed query after year clarification: {params}")
-            result = resolve_quantitative_query(params, user_query=user_query)
-            if result["kind"] == "clarify" and is_multi_gp_clarification(result["message"]):
-                _ask_for_venue_clarification(
-                    conversation_history,
-                    user_query,
-                    category,
-                    "quantitative",
-                    result["message"],
-                    pending_params=params,
-                )
-                continue
-            if result["kind"] in ("clarify", "error"):
-                _respond_and_remember(
-                    conversation_history, user_query, category, result["message"],
-                )
-                continue
-            answer = generate_f1_response(
-                user_query, result["context"], history=conversation_history,
-            )
-            _respond_and_remember(
-                conversation_history, user_query, category, answer,
-                source=result.get("source"),
-                year=year, lookup_params=params,
-            )
-            continue
-
-        category = route_query(user_query, history=conversation_history)
-        print(f" [Router] Intent isolated to: {category.upper()}")
-
-        if category == "ambiguous":
-            answer = get_ambiguous_query_response(user_query, conversation_history) or ambiguous_query_response(user_query)
-            _respond_and_remember(
-                conversation_history,
-                user_query,
-                "help",
-                answer,
-            )
-            continue
-
-        if not awaiting_year and not awaiting_venue and _respond_lap_comparison(conversation_history, user_query):
-            continue
-
-        # 2. Branching Execution Paths
-        offer_other_year = False
-        reg_year: int | None = None
-        source: SourceCitation | None = None
-        context = ""
-
-        if category == "quantitative":
-            print(" [Extractor] Processing query context via Qwen...")
-            params = extract_telemetry_params(user_query, history=conversation_history)
-
-            print(f" [Debug] Qwen Extracted JSON: {params}")
-
-            year_result = resolve_query_year(user_query, params, conversation_history)
-            if year_result["kind"] == "clarify":
-                message = year_result["message"]
-                print(f"\nResponse:\n{message}\n")
-                print("-" * 50)
-                _save_conversation_turn(
-                    conversation_history,
-                    {
-                        **_prompt_for_year(
-                            user_query, category, "quantitative", pending_params=params,
-                        ),
-                        "answer": message,
-                    },
-                )
-                continue
-
-            params["year"] = year_result["year"]
-            history_extra["year"] = params["year"]
-            result = resolve_quantitative_query(params, user_query=user_query)
-            if result["kind"] == "clarify" and is_multi_gp_clarification(result["message"]):
-                _ask_for_venue_clarification(
-                    conversation_history,
-                    user_query,
-                    category,
-                    "quantitative",
-                    result["message"],
-                    pending_params=params,
-                )
-                continue
-            if result["kind"] in ("clarify", "error"):
-                _respond_and_remember(
-                    conversation_history, user_query, category, result["message"],
-                )
-                continue
-            context = result["context"]
-            source = result.get("source")
-
-        elif category == "historical":
-            if not csv_available() and (
-                _is_race_results_query(user_query)
-                or _is_driver_team_query(user_query)
-                or _is_lap_comparison_query(user_query)
-                or (
-                    is_country_race_listing_query(user_query)
-                    and uses_csv_country_race_listing(user_query)
-                )
-            ):
-                _respond_historical_csv_unavailable(conversation_history, user_query)
-                continue
-
-            pending_kind = "historical_race" if _is_race_results_query(user_query) else "historical"
-            if _maybe_ask_for_venue(
-                conversation_history,
-                user_query,
-                category,
-                pending_kind,
-            ):
-                continue
-
-            if _is_race_results_query(user_query):
-                year_result = resolve_race_results_year(user_query, conversation_history)
-                if year_result["kind"] == "clarify":
-                    message = year_result["message"]
-                    print(f"\nResponse:\n{message}\n")
-                    print("-" * 50)
-                    _save_conversation_turn(
-                        conversation_history,
-                        {
-                            **_prompt_for_year(
-                                user_query, category, "historical_race", pending_query=user_query,
-                            ),
-                            "answer": message,
-                        },
-                    )
-                    continue
-
-                year = year_result["year"]
-                history_extra["year"] = year
-                print(f" [CSV] Looking up {year} race classification...")
-                answer = _format_race_results_response(
-                    user_query, conversation_history, year,
-                )
-                _respond_and_remember(
-                    conversation_history, user_query, category, answer,
-                    source=_csv_race_citation_from_query(user_query, year),
-                    year=year, race_lookup_query=user_query,
-                )
-                continue
-
-            print(" [History] Resolving race results...")
-            context, source = _historical_context(user_query, conversation_history)
-
-        else:
-            reg_year = _explicit_year(user_query)
-            offer_other_year = reg_year is None
-            if reg_year is None:
-                reg_year = current_regulations_year()
-            history_extra["year"] = reg_year
-            try:
-                context, source = _regulations_rag_context(category, user_query, reg_year)
-            except FileNotFoundError as e:
-                print(f" [Error] {e}\n")
-                continue
-
-        # 3. Text Generation
-        reg_answer_year = history_extra.get("year") if category in REGULATION_CATEGORIES else None
-        answer = generate_f1_response(
-            user_query,
-            context,
-            history=conversation_history,
-            regulation_year=reg_answer_year,
-        )
-        extra = dict(history_extra)
-        if category == "quantitative":
-            extra["lookup_params"] = params
-        if category in REGULATION_CATEGORIES and offer_other_year:
-            answer += _regulations_year_offer(reg_year)
-            extra["awaiting_year"] = True
-            extra["pending_kind"] = "regulations"
-            extra["pending_query"] = user_query
-        _respond_and_remember(
-            conversation_history, user_query, category, answer, source=source, **extra,
-        )
+        process_query(conversation_history, user_query)
 
 if __name__ == "__main__":
     main()
