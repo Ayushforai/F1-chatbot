@@ -473,3 +473,134 @@ def get_max_speed_trap(
 
     except Exception as e:
         return f"Historical Archive Error: {str(e)}"
+
+
+def fetch_year_meetings(year: int) -> list[dict]:
+    """Return OpenF1 meetings for a season, oldest round first."""
+    try:
+        res = requests.get(
+            f"{BASE_URL}/meetings",
+            params={"year": year},
+            timeout=12,
+        )
+    except requests.RequestException:
+        return []
+    if res.status_code != 200:
+        return []
+    meetings = _payload_list(res.json())
+    meetings.sort(key=lambda row: str(row.get("date_start") or ""))
+    races = []
+    for index, meeting in enumerate(meetings, start=1):
+        date = str(meeting.get("date_start") or "")[:10]
+        weekend_end = date
+        try:
+            weekend_end = (
+                datetime.strptime(date, "%Y-%m-%d") + timedelta(days=2)
+            ).date().isoformat()
+        except ValueError:
+            pass
+        races.append(
+            {
+                "round": index,
+                "name": meeting.get("meeting_name") or meeting.get("circuit_short_name") or "Grand Prix",
+                "date": date,
+                "weekend_start": date,
+                "weekend_end": weekend_end,
+                "circuit": meeting.get("circuit_short_name") or "",
+                "location": meeting.get("location") or "",
+                "country": meeting.get("country_name") or "",
+            }
+        )
+    return races
+
+
+def get_openf1_session_classification(
+    year: int,
+    country: str,
+    session_name: str,
+    location: str | None = None,
+    now: datetime | None = None,
+) -> dict | str:
+    """Return session classification from OpenF1 session_result rows."""
+    session = fetch_session(
+        year,
+        country,
+        session_name=session_name,
+        location=location,
+        now=now,
+    )
+    if isinstance(session, str):
+        return session
+
+    session_key = session["session_key"]
+    try:
+        res = requests.get(
+            f"{BASE_URL}/session_result",
+            params={"session_key": session_key},
+            timeout=12,
+        )
+        results = _payload_list(res.json()) if res.status_code == 200 else []
+        if not results:
+            return f"No {session_name} results found for this session."
+
+        drivers_res = requests.get(
+            f"{BASE_URL}/drivers",
+            params={"session_key": session_key},
+            timeout=12,
+        )
+        drivers = {
+            row["driver_number"]: row
+            for row in _payload_list(drivers_res.json())
+        }
+    except Exception as e:
+        return f"Historical Archive Error: {str(e)}"
+
+    meeting_name = session.get("meeting_name") or session.get("circuit_short_name") or "Grand Prix"
+    rows = sorted(results, key=lambda row: row.get("position") or 999)
+
+    if session_name == "Qualifying":
+        grid = []
+        for row in rows:
+            driver = drivers.get(row.get("driver_number"), {})
+            duration = row.get("duration")
+            grid.append(
+                {
+                    "Position": row.get("position"),
+                    "Driver": driver.get("full_name") or f"Driver {row.get('driver_number')}",
+                    "Team": driver.get("team_name") or "N/A",
+                    "Q1": format_lap_time(duration) if duration else "N/A",
+                    "Q2": "N/A",
+                    "Q3": "N/A",
+                }
+            )
+        return {
+            "Year": year,
+            "Grand Prix": meeting_name,
+            "Session": "Qualifying",
+            "Grid": grid,
+        }
+
+    finishers = []
+    for row in rows:
+        driver = drivers.get(row.get("driver_number"), {})
+        gap = row.get("gap_to_leader")
+        duration = row.get("duration")
+        time_value = format_lap_time(gap if gap is not None else duration)
+        finishers.append(
+            {
+                "Position": str(row.get("position") or "?"),
+                "Driver": driver.get("full_name") or f"Driver {row.get('driver_number')}",
+                "Team": driver.get("team_name") or "N/A",
+                "Gap / Race Time": time_value,
+                "Status": "DNF" if row.get("dnf") else "Finished",
+                "Fastest Lap": "N/A",
+                "Fastest Lap Number": "N/A",
+                "Points": 0,
+            }
+        )
+    return {
+        "Year": year,
+        "Grand Prix": meeting_name,
+        "Session": session_name,
+        "Classification": finishers,
+    }

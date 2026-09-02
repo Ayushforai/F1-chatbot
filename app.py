@@ -28,6 +28,7 @@ from utils.f1_api import (
     get_historical_lap,
     get_max_speed_trap,
     get_max_speed_trap_season,
+    get_openf1_session_classification,
 )
 from utils.vector_store import search_regulations, search_with_metadata, warmup_rag
 from utils.citations import (
@@ -52,12 +53,17 @@ from utils.historical_db import (
     format_country_grand_prix_listing_answer,
     format_driver_teams,
     format_lap_time_delta,
+    format_qualifying_grid,
     format_race_classification,
+    format_session_classification,
     format_top_speed_lookup,
     get_driver_teams,
     get_historical_driver_info,
     get_lap_time_delta,
+    get_qualifying_results,
+    get_sprint_results,
 )
+from utils.session_results import is_session_choice_reply, parse_session_choice, session_results_offer
 from utils.speed_records import best_speed_trap_record, speed_record_to_packet
 from utils.currency import apply_currency_display, get_currency_prompt_rules, refresh_exchange_rates
 from utils.venues import (
@@ -204,6 +210,215 @@ def _regulations_year_offer(year: int) -> str:
     )
 
 
+def _is_race_classification_answer(answer: str) -> bool:
+    return (
+        answer.startswith("The results for the ")
+        and "Classified finishers" in answer
+    )
+
+
+def _session_choice_pending(**fields) -> dict:
+    return {
+        "awaiting_session_choice": True,
+        "pending_kind": "session_results",
+        **fields,
+    }
+
+
+def _csv_session_citation(
+    *,
+    year: int,
+    session_name: str,
+    country: str | None = None,
+    location: str | None = None,
+    source_kind: str = "csv",
+) -> SourceCitation:
+    venue = venue_label(year=year, country=country, location=location)
+    if source_kind == "openf1":
+        return openf1_api(endpoint=f"/session_result ({session_name})", detail=f"{venue} {year}")
+    file_hint = "qualifying.csv" if session_name == "Qualifying" else "sprint_results.csv"
+    return SourceCitation(
+        "csv",
+        f"Historical CSV ({file_hint}) — {year} {venue} ({session_name})",
+    )
+
+
+def _format_session_results_response(
+    year: int,
+    country: str,
+    location: str | None,
+    session_name: str,
+) -> tuple[str, SourceCitation | None]:
+    if session_name == "Qualifying":
+        data = get_qualifying_results(year, country, location=location)
+        if isinstance(data, dict):
+            return format_qualifying_grid(data), _csv_session_citation(
+                year=year,
+                session_name=session_name,
+                country=country,
+                location=location,
+            )
+    elif session_name == "Sprint":
+        data = get_sprint_results(year, country, location=location)
+        if isinstance(data, dict):
+            return format_session_classification(data), _csv_session_citation(
+                year=year,
+                session_name=session_name,
+                country=country,
+                location=location,
+            )
+    else:
+        data = f"Unsupported session type: {session_name}."
+
+    if isinstance(data, str) and data not in (CSV_UNAVAILABLE_MESSAGE, RACE_NOT_HELD_RESULTS_MESSAGE):
+        openf1 = get_openf1_session_classification(
+            year,
+            country,
+            session_name=session_name,
+            location=location,
+        )
+        if isinstance(openf1, dict):
+            if session_name == "Qualifying":
+                text = format_qualifying_grid(openf1)
+            else:
+                text = format_session_classification(openf1)
+            return text, _csv_session_citation(
+                year=year,
+                session_name=session_name,
+                country=country,
+                location=location,
+                source_kind="openf1",
+            )
+        if isinstance(data, str):
+            return data, None
+        return openf1, None
+
+    return data if isinstance(data, str) else "Session results are unavailable.", None
+
+
+def _respond_race_results_with_session_offer(
+    conversation_history: list[dict],
+    user_query: str,
+    answer: str,
+    *,
+    year: int,
+    race_lookup_query: str,
+    country: str | None = None,
+    location: str | None = None,
+) -> None:
+    full_answer = answer
+    extra: dict = {
+        "year": year,
+        "race_lookup_query": race_lookup_query,
+        "country": country,
+        "location": location,
+    }
+    if _is_race_classification_answer(answer):
+        full_answer = answer + session_results_offer()
+        extra.update(
+            _session_choice_pending(
+                pending_query=race_lookup_query,
+                year=year,
+                country=country,
+                location=location,
+            )
+        )
+    _respond_and_remember(
+        conversation_history,
+        user_query,
+        "historical",
+        full_answer,
+        source=_csv_race_citation_from_query(
+            race_lookup_query,
+            year,
+            country=country,
+            location=location,
+        )
+        if answer != RACE_NOT_HELD_RESULTS_MESSAGE and csv_available()
+        else None,
+        **extra,
+    )
+
+
+def _should_abandon_session_choice(user_query: str) -> bool:
+    if is_session_choice_reply(user_query):
+        return False
+    if _is_race_results_query(user_query):
+        return True
+    words = user_query.strip().split()
+    return len(words) > 4
+
+
+def _handle_session_choice_resume(conversation_history: list[dict], user_query: str) -> bool:
+    pending = conversation_history[-1]
+    choice = parse_session_choice(user_query)
+    year = pending.get("year")
+    country = pending.get("country")
+    location = pending.get("location")
+
+    if not country:
+        venue = resolve_venue(query=pending.get("pending_query", user_query))
+        if venue["kind"] == "ok":
+            country = venue["country"]
+            location = venue.get("location")
+
+    if choice == "decline":
+        _respond_and_remember(
+            conversation_history,
+            user_query,
+            "historical",
+            "OK — ask me anything else when you're ready.",
+            year=year,
+            country=country,
+            location=location,
+        )
+        return True
+
+    if choice is None:
+        message = (
+            "Which session would you like? Reply with Qualifying or Sprint, or say no to continue."
+        )
+        print(f"\nResponse:\n{message}\n")
+        print("-" * 50)
+        _save_conversation_turn(
+            conversation_history,
+            {
+                **_session_choice_pending(
+                    pending_query=pending.get("pending_query"),
+                    year=year,
+                    country=country,
+                    location=location,
+                ),
+                "query": user_query,
+                "category": "historical",
+                "answer": message,
+            },
+        )
+        return True
+
+    if year is None or not country:
+        _respond_and_remember(
+            conversation_history,
+            user_query,
+            "historical",
+            "I lost track of which Grand Prix you meant. Please ask for the session results again.",
+        )
+        return True
+
+    print(f" [CSV] Looking up {year} {choice} results...")
+    answer, source = _format_session_results_response(year, country, location, choice)
+    _respond_and_remember(
+        conversation_history,
+        user_query,
+        "historical",
+        answer,
+        source=source,
+        year=year,
+        country=country,
+        location=location,
+    )
+    return True
+
 def _is_race_results_query(user_query: str) -> bool:
     """True when the user is asking for full results of a specific Grand Prix."""
     if not _wants_full_classification_or_pace(user_query):
@@ -315,16 +530,17 @@ def _handle_race_results_query(conversation_history: list[dict], user_query: str
         )
         return True
 
-    _respond_and_remember(
+    venue = resolve_venue(query=user_query)
+    country = venue.get("country") if venue["kind"] == "ok" else None
+    location = venue.get("location") if venue["kind"] == "ok" else None
+    _respond_race_results_with_session_offer(
         conversation_history,
         user_query,
-        "historical",
         answer,
-        source=_csv_race_citation_from_query(user_query, year)
-        if answer != RACE_NOT_HELD_RESULTS_MESSAGE and csv_available()
-        else None,
         year=year,
         race_lookup_query=user_query,
+        country=country,
+        location=location,
     )
     return True
 
@@ -1638,17 +1854,10 @@ def _handle_venue_clarification_resume(conversation_history: list[dict], user_qu
         print(f" [Router] Resuming race-results query after venue clarification")
         print(f" [CSV] Looking up {year} race classification...")
         answer = _format_race_results_response(enriched_query, conversation_history, year)
-        _respond_and_remember(
+        _respond_race_results_with_session_offer(
             conversation_history,
             user_query,
-            category,
             answer,
-            source=_csv_race_citation_from_query(
-                enriched_query,
-                year,
-                country=venue["country"],
-                location=venue.get("location"),
-            ),
             year=year,
             race_lookup_query=enriched_query,
             country=venue["country"],
@@ -1852,6 +2061,7 @@ def current_response(history: list[dict]) -> dict:
         "category": last.get("category") or "",
         "awaiting_year": bool(last.get("awaiting_year")),
         "awaiting_venue": bool(last.get("awaiting_venue")),
+        "awaiting_session_choice": bool(last.get("awaiting_session_choice")),
     }
 
 
@@ -1871,6 +2081,7 @@ def _error_response(message: str) -> dict:
         "category": "error",
         "awaiting_year": False,
         "awaiting_venue": False,
+        "awaiting_session_choice": False,
     }
 
 
@@ -1878,13 +2089,18 @@ def process_query(conversation_history: list[dict], user_query: str) -> dict | N
     """Handle one user turn. Returns the serialized assistant response, or None if skipped."""
     awaiting_year = conversation_history and conversation_history[-1].get("awaiting_year")
     awaiting_venue = conversation_history and conversation_history[-1].get("awaiting_venue")
-    if not user_query and not awaiting_year and not awaiting_venue:
+    awaiting_session = conversation_history and conversation_history[-1].get("awaiting_session_choice")
+    if not user_query and not awaiting_year and not awaiting_venue and not awaiting_session:
         return None
 
     history_extra: dict = {}
 
     if awaiting_venue and not _should_abandon_venue_clarification(user_query):
         _handle_venue_clarification_resume(conversation_history, user_query)
+        return current_response(conversation_history)
+
+    if awaiting_session and not _should_abandon_session_choice(user_query):
+        _handle_session_choice_resume(conversation_history, user_query)
         return current_response(conversation_history)
 
     if not awaiting_year and not awaiting_venue and _respond_lap_comparison(conversation_history, user_query):
@@ -1967,10 +2183,17 @@ def process_query(conversation_history: list[dict], user_query: str) -> dict | N
                     year=year,
                 )
                 return current_response(conversation_history)
-            _respond_and_remember(
-                conversation_history, user_query, "historical", answer,
-                source=_csv_race_citation_from_query(original_query, year),
-                year=year, race_lookup_query=original_query,
+            venue = resolve_venue(query=original_query)
+            country = venue.get("country") if venue["kind"] == "ok" else pending.get("country")
+            location = venue.get("location") if venue["kind"] == "ok" else pending.get("location")
+            _respond_race_results_with_session_offer(
+                conversation_history,
+                user_query,
+                answer,
+                year=year,
+                race_lookup_query=original_query,
+                country=country,
+                location=location,
             )
             return current_response(conversation_history)
 

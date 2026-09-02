@@ -20,6 +20,8 @@ constructors_df = None
 results_df = None
 status_df = None
 lap_times_df = None
+qualifying_df = None
+sprint_results_df = None
 
 try:
     races_df = pd.read_csv(os.path.join(DATA_DIR, "races.csv"))
@@ -29,6 +31,8 @@ try:
     results_df = pd.read_csv(os.path.join(DATA_DIR, "results.csv"))
     status_df = pd.read_csv(os.path.join(DATA_DIR, "status.csv"))
     lap_times_df = pd.read_csv(os.path.join(DATA_DIR, "lap_times.csv"))
+    qualifying_df = pd.read_csv(os.path.join(DATA_DIR, "qualifying.csv"))
+    sprint_results_df = pd.read_csv(os.path.join(DATA_DIR, "sprint_results.csv"))
 except FileNotFoundError:
     print(f"Warning: {CSV_UNAVAILABLE_MESSAGE}")
 
@@ -161,6 +165,178 @@ def get_race_results(year: int, country: str, top_n: int | None = None, location
         return packet
     except Exception as e:
         return f"Historical Database Error: {str(e)}"
+
+
+def _session_results_common(
+    year: int,
+    country: str,
+    location: str | None,
+    results_frame: pd.DataFrame | None,
+    empty_message: str,
+) -> tuple[int, str, pd.DataFrame] | str:
+    from utils.race_schedule import (
+        RACE_NOT_HELD_RESULTS_MESSAGE,
+        _parse_race_date,
+        race_results_unavailable_reason,
+    )
+
+    missing = _require_csv()
+    if missing:
+        return missing
+    if results_frame is None:
+        return empty_message
+
+    try:
+        races_yr = _races_for_venue(year, country, location=location)
+
+        if races_yr.empty:
+            unavailable = race_results_unavailable_reason(year, country, location=location)
+            if unavailable:
+                return unavailable
+            return f"No races found for {year}" + (f" matching '{country}'." if country else ".")
+
+        if country in MULTI_GP_COUNTRIES and not location and len(races_yr) > 1:
+            return multi_gp_clarification(country)
+
+        race_date = _parse_race_date(races_yr.iloc[0].get("date"))
+        if race_date and race_date > datetime.now(timezone.utc).date():
+            return RACE_NOT_HELD_RESULTS_MESSAGE
+
+        unavailable = race_results_unavailable_reason(year, country, location=location)
+        if unavailable:
+            return unavailable
+
+        race_id = races_yr.iloc[0]["raceId"]
+        race_name = races_yr.iloc[0]["name"]
+        session_rows = results_frame[results_frame["raceId"] == race_id]
+        if session_rows.empty:
+            return empty_message
+
+        return race_id, race_name, session_rows
+    except Exception as e:
+        return f"Historical Database Error: {str(e)}"
+
+
+def get_qualifying_results(
+    year: int,
+    country: str,
+    location: str | None = None,
+) -> dict | str:
+    """Return qualifying grid data for a Grand Prix."""
+    lookup = _session_results_common(
+        year,
+        country,
+        location,
+        qualifying_df,
+        "No qualifying results found for this Grand Prix.",
+    )
+    if not isinstance(lookup, tuple):
+        return lookup
+
+    race_id, race_name, session_rows = lookup
+    try:
+        qual = (
+            session_rows.merge(drivers_df[["driverId", "forename", "surname"]], on="driverId")
+            .merge(constructors_df[["constructorId", "name"]], on="constructorId")
+            .sort_values("position")
+        )
+        grid = []
+        for _, row in qual.iterrows():
+            grid.append(
+                {
+                    "Position": int(row["position"]),
+                    "Driver": f"{row['forename']} {row['surname']}",
+                    "Team": row["name"],
+                    "Q1": _cell(row.get("q1")),
+                    "Q2": _cell(row.get("q2")),
+                    "Q3": _cell(row.get("q3")),
+                }
+            )
+        return {
+            "Year": year,
+            "Grand Prix": race_name,
+            "Session": "Qualifying",
+            "Grid": grid,
+        }
+    except Exception as e:
+        return f"Historical Database Error: {str(e)}"
+
+
+def get_sprint_results(
+    year: int,
+    country: str,
+    location: str | None = None,
+) -> dict | str:
+    """Return sprint classification data for a Grand Prix."""
+    lookup = _session_results_common(
+        year,
+        country,
+        location,
+        sprint_results_df,
+        "No sprint results found for this Grand Prix.",
+    )
+    if not isinstance(lookup, tuple):
+        return lookup
+
+    race_id, race_name, session_rows = lookup
+    try:
+        res = (
+            session_rows.merge(drivers_df[["driverId", "forename", "surname"]], on="driverId")
+            .merge(constructors_df[["constructorId", "name"]], on="constructorId")
+            .merge(status_df, on="statusId", how="left")
+            .sort_values("positionOrder")
+        )
+        finishers = []
+        for _, row in res.iterrows():
+            finishers.append(
+                {
+                    "Position": row["positionText"],
+                    "Driver": f"{row['forename']} {row['surname']}",
+                    "Team": row["name"],
+                    "Gap / Race Time": _cell(row["time"]),
+                    "Status": _cell(row.get("status")),
+                    "Fastest Lap": _cell(row.get("fastestLapTime")),
+                    "Fastest Lap Number": _cell(row.get("fastestLap")),
+                    "Points": row["points"],
+                }
+            )
+        return {
+            "Year": year,
+            "Grand Prix": race_name,
+            "Session": "Sprint",
+            "Classification": finishers,
+        }
+    except Exception as e:
+        return f"Historical Database Error: {str(e)}"
+
+
+def format_qualifying_grid(packet: dict) -> str:
+    """Render qualifying times as a starting grid."""
+    year = packet.get("Year")
+    gp = packet.get("Grand Prix")
+    grid = packet.get("Grid") or []
+    lines = [f"The qualifying results for the {year} {gp} are as follows:", ""]
+    lines.append(f"Starting grid ({len(grid)}):")
+    for row in grid:
+        segments = []
+        for segment in ("Q1", "Q2", "Q3"):
+            value = row.get(segment)
+            if value and value != "N/A":
+                segments.append(f"{segment}: {value}")
+        times = ", ".join(segments) if segments else "no time recorded"
+        lines.append(
+            f"P{row.get('Position')}. {row.get('Driver')} ({row.get('Team')}) - {times}"
+        )
+    return "\n".join(lines)
+
+
+def format_session_classification(packet: dict) -> str:
+    """Render race or sprint classification packets."""
+    session = packet.get("Session") or "Race"
+    text = format_race_classification(packet)
+    if session == "Sprint":
+        return text.replace("The results for the", "The sprint results for the", 1)
+    return text
 
 
 _NON_CLASSIFIED_POS = {"R", "D", "W", "N", "E", "F"}
