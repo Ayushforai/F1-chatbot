@@ -191,7 +191,9 @@ class TestOpenF1VenueAndFutureSession(unittest.TestCase):
     def test_missing_session_in_past_year_is_not_found(self):
         with patch("utils.f1_api.requests.get", return_value=_response({"detail": "No results found."}, status=404)):
             result = fetch_race_session(2019, "Singapore", now=NOW)
-        self.assertIn("Could not locate a race session", result)
+        self.assertIn("Could not locate a Race session", result)
+        self.assertIn("Singapore", result)
+        self.assertIn("2019", result)
 
     def test_app_asks_which_us_gp(self):
         params = {

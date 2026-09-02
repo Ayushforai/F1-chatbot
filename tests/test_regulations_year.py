@@ -34,6 +34,7 @@ class RegulationsYearDefaultTests(unittest.TestCase):
         with patch("app.ollama.generate", return_value={"response": "answer"}) as generate:
             app.generate_f1_response("cost cap", "context", regulation_year=2026)
         self.assertIn("2026 season regulations", generate.call_args.kwargs["system"])
+        self.assertIn("FORMAT RULES", generate.call_args.kwargs["system"])
 
     def test_handle_regulations_resume_uses_requested_year(self):
         history = [

@@ -1,4 +1,7 @@
 streamlit
+fastapi
+uvicorn
+httpx
 huggingface_hub
 python-dotenv
 pandas

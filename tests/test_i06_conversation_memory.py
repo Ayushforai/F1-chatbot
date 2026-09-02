@@ -68,6 +68,22 @@ class TestI06ConversationMemory(unittest.TestCase):
         )
         self.assertEqual(history[-1]["answer"], "Max Verstappen won.")
 
+    def test_current_response_splits_citation(self):
+        history = [
+            {
+                "query": "who won?",
+                "category": "historical",
+                "answer": "Max Verstappen won.\n\n— Source: Historical CSV — 2021",
+            }
+        ]
+        payload = app.current_response(history)
+        self.assertEqual(payload["body"], "Max Verstappen won.")
+        self.assertEqual(payload["citation"], "Historical CSV — 2021")
+        self.assertFalse(payload["awaiting_year"])
+
+    def test_process_query_skips_empty(self):
+        self.assertIsNone(app.process_query([], ""))
+
     def test_user_wants_fresh_lookup(self):
         self.assertTrue(app._user_wants_fresh_lookup("verify who finished second"))
         self.assertTrue(app._user_wants_fresh_lookup("look it up again"))
