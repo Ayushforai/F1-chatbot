@@ -87,7 +87,7 @@ Embeddings stay on **Hugging Face** (`BAAI/bge-base-en-v1.5`) in both environmen
 - Cloud LLM: **Gemini** (recommended) or **Groq**
 - Host secrets: `HF_TOKEN`, `GEMINI_API_KEY` or `GROQ_API_KEY`, optional `CORS_ORIGINS`
 - Outbound HTTPS for OpenF1, Hugging Face, currency FX, and the LLM API
-- Built FAISS indexes (`vector_store/`) available in the Docker build context
+- Built FAISS indexes (`vector_store/*/index.faiss`) and historical CSVs (`data/historical_csvs/`) are committed so the Docker image includes them (`data/archive/` is excluded)
 
 ### Deploy checklist
 
