@@ -16,7 +16,9 @@ DEFAULT_PROVIDER = "ollama"
 DEFAULT_MODELS = {
     "ollama": "qwen2.5:7b-instruct-q8_0",
     "groq": "llama-3.3-70b-versatile",
-    "gemini": "gemini-2.0-flash",
+    # Prefer current Gemini 3.x Flash for deploy. Override with LLM_MODEL if needed:
+    # gemini-3.6-flash-lite | gemini-3.8-flash | gemini-3.1-pro-preview
+    "gemini": "gemini-3.6-flash",
     "openai": "gpt-4o-mini",
     "grok": "grok-2-latest",
 }

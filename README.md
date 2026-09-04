@@ -9,20 +9,36 @@ Racecoe uses **different LLM setups** for local development and cloud deployment
 | Environment | LLM | Notes |
 |-------------|-----|--------|
 | **Local development** | [Ollama](https://ollama.com/) with `qwen2.5:7b-instruct-q8_0` | Set `LLM_PROVIDER=ollama` (default). No cloud API key required. |
-| **Deployed / production** | **Gemini** (recommended) or **Groq** | Set `LLM_PROVIDER=gemini` or `groq` plus the matching API key. |
+| **Deployed / production** | **Gemini 3.6 Flash** (`gemini-3.6-flash`) | Set `LLM_PROVIDER=gemini` + `GEMINI_API_KEY`. Override with `LLM_MODEL` for Lite / 3.8 Flash / 3.1 Pro. |
 
 One codebase supports both via `utils/llm.py` (`LLM_PROVIDER` + optional `LLM_MODEL`).
 
-### Which cloud API is best for Racecoe?
+### Why not Gemini 2.0 Flash?
 
-| Provider | Best for Racecoe? | Why |
-|----------|-------------------|-----|
-| **Google Gemini** | **Recommended default for deploy** | Strong free tier, good instruction-following for “answer only from context”, solid JSON extraction for routing. |
-| **Groq** | Excellent alternative | Very fast and cheap/free-tier friendly; great for low-latency chat. Slightly less deliberate than Gemini on long regulation answers. |
-| **OpenAI** | Best if you pay | Highest general quality (`gpt-4o-mini` is a strong paid baseline), but not the best free-deploy choice. |
-| **Grok (xAI)** | Not recommended here | Fun conversational model, weaker fit for strict factual RAG / “never invent results” behaviour. Supported via `LLM_PROVIDER=grok` if you still want it. |
+We originally defaulted to `gemini-2.0-flash` as a safe generic ID. That model is outdated (retired mid-2026). Racecoe now defaults to **`gemini-3.6-flash`**.
 
-**Practical pick:** use **Ollama locally**, **Gemini in production**. Keep Groq as a fast fallback by switching `LLM_PROVIDER`.
+### Google One Plus vs Gemini API
+
+The models you see in the **Gemini app** with Google One Plus (Flash 3.6 Lite, Flash 3.6, 3.1 Pro) are **consumer product names**. Racecoe talks to the **Gemini Developer API**, which uses model IDs like:
+
+| What you see in Gemini app | Typical API model ID |
+|----------------------------|----------------------|
+| Flash 3.6 / Flash | `gemini-3.6-flash` (**Racecoe default**) |
+| Flash 3.6 Lite / Flash Lite | `gemini-3.5-flash-lite` (or newer lite ID your project lists) |
+| 3.1 Pro | `gemini-3.1-pro-preview` |
+| Newer Flash (e.g. 3.8) | `gemini-3.8-flash` |
+
+Google One subscription does **not** automatically give your Docker app those models. You still need a **`GEMINI_API_KEY`** from [Google AI Studio](https://aistudio.google.com/apikey). Once you have the key, you can use the same generation of models via `LLM_MODEL`.
+
+**Racecoe recommendation:** keep **`gemini-3.6-flash`** for deploy (fast + strong for RAG/JSON). Use **3.1 Pro** only if answers need deeper reasoning and you accept more latency/cost:
+
+```bash
+export LLM_PROVIDER=gemini
+export GEMINI_API_KEY=...
+export LLM_MODEL=gemini-3.6-flash          # default
+# export LLM_MODEL=gemini-3.1-pro-preview  # optional heavier model
+# export LLM_MODEL=gemini-3.8-flash        # if available on your API project
+```
 
 Embeddings stay on **Hugging Face** (`BAAI/bge-base-en-v1.5`) in both environments (set `HF_TOKEN`).
 
@@ -272,7 +288,7 @@ python app.py
 | Setup | Recommendation |
 |-------|----------------|
 | **Local LLM** | Use **Ollama** (`LLM_PROVIDER=ollama`, model `qwen2.5:7b-instruct-q8_0`). |
-| **Production LLM** | Use **Gemini** (`LLM_PROVIDER=gemini`) or **Groq**. Do not rely on Ollama on typical cloud free tiers. |
+| **Production LLM** | Use **Gemini 3.6 Flash** (`LLM_PROVIDER=gemini`, `LLM_MODEL=gemini-3.6-flash`). Override to Lite / 3.8 Flash / 3.1 Pro via `LLM_MODEL`. |
 | **Packaging** | Prefer **Docker** (`Dockerfile`): builds the React app, copies CSVs + `vector_store/`, runs `uvicorn server:app --host 0.0.0.0 --port $PORT`. |
 | **Long-running API server** | Keep one process alive. Embedding weights load once at boot and serve all RAG queries until shutdown. |
 | **Hugging Face cache** | Mount or bake `~/.cache/huggingface`, or set `HF_HOME`, so embedding weights persist across container restarts. |

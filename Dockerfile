@@ -17,7 +17,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     HOST=0.0.0.0 \
     PORT=8000 \
     LLM_PROVIDER=gemini \
-    LLM_MODEL=gemini-2.0-flash \
+    LLM_MODEL=gemini-3.6-flash \
     F1_SKIP_WARMUP=0
 
 WORKDIR /app

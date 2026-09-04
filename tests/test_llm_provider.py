@@ -15,9 +15,9 @@ class TestLlmProviderAbstraction(unittest.TestCase):
             self.assertIn("qwen", llm.get_model_name("ollama"))
 
     def test_provider_env_override(self):
-        with patch.dict(os.environ, {"LLM_PROVIDER": "gemini", "LLM_MODEL": "gemini-2.0-flash"}, clear=False):
+        with patch.dict(os.environ, {"LLM_PROVIDER": "gemini", "LLM_MODEL": "gemini-3.6-flash"}, clear=False):
             self.assertEqual(llm.get_provider(), "gemini")
-            self.assertEqual(llm.get_model_name(), "gemini-2.0-flash")
+            self.assertEqual(llm.get_model_name(), "gemini-3.6-flash")
 
     def test_gemini_requires_api_key(self):
         with patch.dict(
