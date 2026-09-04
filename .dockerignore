@@ -1,0 +1,25 @@
+botenv/
+.venv/
+.git/
+.github/
+.vscode/
+.cursor/
+**/__pycache__/
+**/*.pyc
+.env
+.DS_Store
+*.swp
+
+# Local frontend deps (image builds its own)
+frontend/node_modules/
+frontend/dist/
+
+# Huge optional archives — not needed at runtime if FAISS indexes exist
+data/archive/
+
+# Tests / docs not required in runtime image
+tests/
+scripts/
+*.md
+!README.md
+Racecoe FastAPi flow.png

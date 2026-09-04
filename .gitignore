@@ -11,8 +11,12 @@ botenv/
 .idea/
 *.swp
 
-# Generated artifacts (rebuild with pdf_processor.py)
-vector_store/
+# Generated FAISS indexes (rebuild with pdf_processor.py / historical_processor.py).
+# Keep folder placeholders in git so Docker COPY always has a path; binaries stay local.
+vector_store/**
+!vector_store/.gitkeep
+!vector_store/**/
+!vector_store/**/.gitkeep
 
 # Large optional datasets (download locally via setup_historical_data.py)
 data/archive/
