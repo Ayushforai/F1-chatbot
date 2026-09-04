@@ -1,6 +1,19 @@
-# F1 Chatbot
+# Racecoe
 
-A hybrid Formula 1 assistant that routes questions to the right data source: live telemetry (OpenF1), structured historical CSV lookups, or RAG over FIA regulation PDFs and historical race documents.
+A hybrid Formula 1 assistant (formerly the F1 Pit Wall chatbot) that routes questions to the right data source: live telemetry (OpenF1), structured historical CSV lookups, or RAG over FIA regulation PDFs and historical race documents.
+
+## Models & deployment (local vs production)
+
+Racecoe uses **different LLM setups** for local development and cloud deployment:
+
+| Environment | LLM | Notes |
+|-------------|-----|--------|
+| **Local development** | [Ollama](https://ollama.com/) with `qwen2.5:7b-instruct-q8_0` | Runs entirely on your machine. No cloud API key required for chat generation. |
+| **Deployed / production** | **Groq** or **Google Gemini** (cloud API) | Ollama is not practical on typical free/cloud hosts. Production switches to a hosted LLM via API keys in environment variables. |
+
+**Why the switch?** Local Ollama needs a capable machine and a long-running model process. Deployed Racecoe uses Groq or Gemini so the app can run in Docker on Railway, Render, Hugging Face Spaces, or similar without shipping a local LLM binary.
+
+Embeddings stay on **Hugging Face** (`BAAI/bge-base-en-v1.5`) in both environments (set `HF_TOKEN` in `.env`).
 
 ## Features
 
@@ -38,11 +51,19 @@ A hybrid Formula 1 assistant that routes questions to the right data source: liv
 
 ## Requirements
 
+### Local development
 - Python 3.11+
+- Node.js 18+ (for the React / Vite frontend)
 - [Ollama](https://ollama.com/) with `qwen2.5:7b-instruct-q8_0` pulled locally
 - Hugging Face read token (for embedding model downloads)
 
-## Setup
+### Production / deploy
+- Docker (recommended) or a Python host that can run FastAPI + the frontend build
+- Cloud LLM API access: **Groq** and/or **Google Gemini**
+- Environment secrets: `HF_TOKEN`, plus provider keys such as `GROQ_API_KEY` or `GEMINI_API_KEY`
+- Outbound HTTPS for OpenF1, Hugging Face, currency FX, and the chosen LLM API
+
+## Setup (local)
 
 ```bash
 python3 -m venv botenv
@@ -53,7 +74,7 @@ pip install -r requirements.txt
 cp .env.example .env
 # Edit .env and set HF_TOKEN=...
 
-# Pull the local LLM
+# Pull the local LLM (development only)
 ollama pull qwen2.5:7b-instruct-q8_0
 
 # Build FAISS indexes from FIA PDFs in data/
@@ -65,9 +86,14 @@ python historical_processor.py
 
 # Refresh OpenF1 driver name → car number grid (used for live/lap lookups)
 python setup_driver_numbers.py
+
+# Frontend (optional for web UI)
+cd frontend && npm install && npm run build && cd ..
 ```
 
 ## Usage
+
+### CLI
 
 ```bash
 source botenv/bin/activate
@@ -75,6 +101,21 @@ python app.py
 ```
 
 Run `python app.py` from an integrated **Terminal** tab (not the Debug Console) so backspace and arrow keys work while typing.
+
+### Web UI (FastAPI + React)
+
+```bash
+source botenv/bin/activate
+python server.py
+# open http://127.0.0.1:5001
+```
+
+For frontend hot-reload during UI work:
+
+```bash
+cd frontend && npm run dev
+# proxies /api to http://127.0.0.1:5001
+```
 
 On startup you will see:
 
@@ -103,16 +144,21 @@ Example queries:
 ```bash
 source botenv/bin/activate
 PYTHONPATH=. python -m unittest discover -s tests -v
+
+# Frontend answer-formatting unit tests
+cd frontend && node --test src/formatAnswer.test.js
 ```
 
 ## Project Structure
 
 ```
 app.py                  # Main chat loop, clarification flows, memory
+server.py               # FastAPI wrapper + serves frontend/dist
 pdf_processor.py        # Builds FAISS indexes from FIA PDFs
 historical_processor.py # Builds FAISS index from historical CSVs
 setup_historical_data.py # Downloads Kaggle historical dataset
 setup_driver_numbers.py # Fetches OpenF1 driver grid → data/driver_numbers.json
+frontend/               # Racecoe React (Vite) UI
 data/
   driver_numbers.json   # Name / acronym / #NN → car number per season (OpenF1)
   historical_csvs/
@@ -148,7 +194,7 @@ ISSUES.md               # Bug backlog and fix history
 
 ### What stays loaded
 
-When you run `app.py`, the bot keeps two things in memory for the **entire session** (until you type `exit` or kill the process):
+When you run `app.py` or `server.py`, the bot keeps two things in memory for the **entire session** (until you exit or kill the process):
 
 | Cached in memory | Loaded when | Reloaded? |
 |------------------|-------------|-----------|
@@ -190,9 +236,12 @@ python app.py
 
 | Setup | Recommendation |
 |-------|----------------|
-| **Long-running CLI / API server** | Keep one process alive. Weights load once at boot and serve all RAG queries until shutdown. |
-| **Docker** | Bake `vector_store/` and the Hugging Face model cache into the image, or mount `~/.cache/huggingface`. Set `HF_HOME` so weights persist across container restarts. |
-| **Serverless / scale-to-zero** | Every cold start reloads the model unless you use provisioned concurrency, an always-on sidecar, or a managed embedding API. Consider a smaller model or ONNX if latency matters. |
-| **Multiple workers** | Each worker holds its own copy of the model (~400MB). Prefer 1–2 workers with async, or a shared external embedding service. |
+| **Local LLM** | Use **Ollama** (`qwen2.5:7b-instruct-q8_0`) while developing on your machine. |
+| **Production LLM** | Switch to **Groq** or **Google Gemini** via API keys. Do not rely on Ollama inside typical cloud free tiers. |
+| **Packaging** | Prefer **Docker**: bake `vector_store/`, CSVs, and the frontend build (`frontend/dist`) into the image; run `uvicorn server:app --host 0.0.0.0 --port $PORT`. |
+| **Long-running API server** | Keep one process alive. Embedding weights load once at boot and serve all RAG queries until shutdown. |
+| **Hugging Face cache** | Mount or bake `~/.cache/huggingface`, or set `HF_HOME`, so embedding weights persist across container restarts. |
+| **Serverless / scale-to-zero** | Every cold start reloads the embedding model unless you use provisioned concurrency or a managed embedding API. |
+| **Multiple workers** | Each worker holds its own copy of the embedding model (~400MB). Prefer 1–2 workers with async, or a shared external embedding service. |
 
 Do **not** spawn a fresh Python process per query in production — that would reload weights every time regardless of in-process caching.
