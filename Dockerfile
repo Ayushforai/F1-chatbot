@@ -32,9 +32,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
-# CPU torch first (no CUDA nvidia-* packages), then the rest of requirements.
-RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu \
-      "torch==2.2.2+cpu" \
+# Install CPU torch from the PyTorch index (avoids CUDA nvidia-* packages).
+RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch \
     && pip install --no-cache-dir -r requirements.txt
 
 COPY app.py server.py pdf_processor.py historical_processor.py \

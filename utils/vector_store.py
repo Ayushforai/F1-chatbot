@@ -4,11 +4,6 @@ import os
 from langchain_community.vectorstores import FAISS
 
 from utils.embeddings import get_embeddings, preload_embeddings
-from utils.regulation_parser import (
-    extract_regulation_refs,
-    is_broad_regulation_query,
-    lookup_articles,
-)
 
 VECTOR_STORE_ROOT = "./vector_store"
 REGULATION_CATEGORIES = frozenset({"general", "sporting", "technical", "financial", "operational"})
@@ -136,6 +131,12 @@ def search_regulations(
     k: int = 5,
 ) -> tuple[list[str], list[dict]]:
     """Hybrid regulation search: exact article lookup + vector retrieval."""
+    from utils.regulation_parser import (
+        extract_regulation_refs,
+        is_broad_regulation_query,
+        lookup_articles,
+    )
+
     article_refs, section_refs = extract_regulation_refs(query)
     broad = is_broad_regulation_query(query)
     retrieval_k = 20 if broad else max(k, 8 if article_refs or section_refs else k)

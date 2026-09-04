@@ -8,7 +8,6 @@ import re
 from dataclasses import dataclass
 
 from langchain_core.documents import Document
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 ARTICLE_HEADER_RE = re.compile(
     r"(?:^|\n)\s*ARTICLE\s+([A-Z]?\d+[A-Z]?)\s*[:\-]\s*(.+?)(?=\n|$)",
@@ -201,6 +200,8 @@ def _page_for_offset(page_starts: list[tuple[int, int]], offset: int) -> int:
 
 def articles_to_documents(articles: list[ParsedArticle]) -> list[Document]:
     """Convert parsed articles into LangChain documents, splitting long bodies."""
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
+
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=CHUNK_SIZE,
         chunk_overlap=CHUNK_OVERLAP,
