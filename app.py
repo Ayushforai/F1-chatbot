@@ -305,6 +305,7 @@ def _respond_race_results_with_session_offer(
     race_lookup_query: str,
     country: str | None = None,
     location: str | None = None,
+    source: SourceCitation | None = None,
 ) -> None:
     full_answer = answer
     extra: dict = {
@@ -328,25 +329,39 @@ def _respond_race_results_with_session_offer(
         user_query,
         "historical",
         full_answer,
-        source=_csv_race_citation_from_query(
-            race_lookup_query,
-            year,
-            country=country,
-            location=location,
-        )
-        if answer != RACE_NOT_HELD_RESULTS_MESSAGE and csv_available()
-        else None,
+        source=source if answer != RACE_NOT_HELD_RESULTS_MESSAGE else None,
         **extra,
     )
 
 
-def _should_abandon_session_choice(user_query: str) -> bool:
+def _should_abandon_session_choice(user_query: str, history: list[dict] | None = None) -> bool:
+    """Leave the Qualifying/Sprint prompt when the user asks about the race instead."""
     if is_session_choice_reply(user_query):
         return False
     if _is_race_results_query(user_query):
         return True
+    if history and _is_answer_follow_up(user_query, history):
+        return True
     words = user_query.strip().split()
     return len(words) > 4
+
+
+def _race_context_fields(pending: dict) -> dict:
+    """Carry race identity forward so follow-ups stay on the same Grand Prix."""
+    fields = {
+        "year": pending.get("year"),
+        "country": pending.get("country"),
+        "location": pending.get("location"),
+    }
+    race_query = (
+        pending.get("race_lookup_query")
+        or pending.get("pending_query")
+        or pending.get("query")
+    )
+    if race_query:
+        fields["race_lookup_query"] = race_query
+        fields["pending_query"] = race_query
+    return {k: v for k, v in fields.items() if v is not None}
 
 
 def _handle_session_choice_resume(conversation_history: list[dict], user_query: str) -> bool:
@@ -355,12 +370,16 @@ def _handle_session_choice_resume(conversation_history: list[dict], user_query: 
     year = pending.get("year")
     country = pending.get("country")
     location = pending.get("location")
+    race_fields = _race_context_fields(pending)
 
     if not country:
         venue = resolve_venue(query=pending.get("pending_query", user_query))
         if venue["kind"] == "ok":
             country = venue["country"]
             location = venue.get("location")
+            race_fields["country"] = country
+            if location:
+                race_fields["location"] = location
 
     if choice == "decline":
         _respond_and_remember(
@@ -368,9 +387,7 @@ def _handle_session_choice_resume(conversation_history: list[dict], user_query: 
             user_query,
             "historical",
             "OK — ask me anything else when you're ready.",
-            year=year,
-            country=country,
-            location=location,
+            **race_fields,
         )
         return True
 
@@ -384,7 +401,7 @@ def _handle_session_choice_resume(conversation_history: list[dict], user_query: 
             conversation_history,
             {
                 **_session_choice_pending(
-                    pending_query=pending.get("pending_query"),
+                    pending_query=race_fields.get("pending_query") or pending.get("pending_query"),
                     year=year,
                     country=country,
                     location=location,
@@ -392,6 +409,7 @@ def _handle_session_choice_resume(conversation_history: list[dict], user_query: 
                 "query": user_query,
                 "category": "historical",
                 "answer": message,
+                **{k: v for k, v in race_fields.items() if k != "pending_query"},
             },
         )
         return True
@@ -407,15 +425,19 @@ def _handle_session_choice_resume(conversation_history: list[dict], user_query: 
 
     print(f" [CSV] Looking up {year} {choice} results...")
     answer, source = _format_session_results_response(year, country, location, choice)
+    fields = {
+        **race_fields,
+        "year": year,
+        "country": country,
+        "location": location,
+    }
     _respond_and_remember(
         conversation_history,
         user_query,
         "historical",
         answer,
         source=source,
-        year=year,
-        country=country,
-        location=location,
+        **{k: v for k, v in fields.items() if v is not None},
     )
     return True
 
@@ -455,33 +477,76 @@ def _apply_pending_year_clarification(user_query: str, pending: dict) -> dict:
     return params
 
 
-def _format_race_results_response(user_query: str, history: list[dict], year: int) -> str:
-    """Look up and format full race results for the given year."""
-    if not csv_available():
-        return CSV_UNAVAILABLE_MESSAGE
-
+def _resolve_race_results(
+    user_query: str,
+    history: list[dict],
+    year: int,
+) -> tuple[str, SourceCitation | None]:
+    """Look up full race results from CSV, falling back to OpenF1 for recent seasons."""
     venue = resolve_venue(query=user_query)
     if venue["kind"] == "clarify":
-        return venue["message"]
+        return venue["message"], None
 
+    country = None
+    location = None
     if venue["kind"] == "ok":
+        country = venue["country"]
+        location = venue.get("location")
         unavailable = race_results_unavailable_reason(
             year,
-            venue["country"],
-            venue.get("location"),
+            country,
+            location,
         )
         if unavailable:
-            return unavailable
+            return unavailable, None
 
-    context = _csv_historical_record(user_query, history, year=year)
-    if context and is_multi_gp_clarification(context):
-        return context
-    if context:
-        return context
+    if csv_available():
+        context = _csv_historical_record(user_query, history, year=year)
+        if context and is_multi_gp_clarification(context):
+            return context, None
+        if context:
+            return context, _csv_race_citation_from_query(
+                user_query,
+                year,
+                country=country,
+                location=location,
+            )
+
+    openf1_result = None
+    if country:
+        print(f" [OpenF1] CSV miss — fetching {year} Race classification from API...")
+        openf1_result = get_openf1_session_classification(
+            year,
+            country,
+            session_name="Race",
+            location=location,
+        )
+        if isinstance(openf1_result, dict):
+            return format_session_classification(openf1_result), _csv_session_citation(
+                year=year,
+                session_name="Race",
+                country=country,
+                location=location,
+                source_kind="openf1",
+            )
+
+    if not csv_available():
+        return CSV_UNAVAILABLE_MESSAGE, None
+
+    if isinstance(openf1_result, str):
+        return openf1_result, None
+
     return (
         f"No race results found in the historical CSV database for "
-        f"{year}. Check the Grand Prix name or year and try again."
+        f"{year}. Check the Grand Prix name or year and try again.",
+        None,
     )
+
+
+def _format_race_results_response(user_query: str, history: list[dict], year: int) -> str:
+    """Look up and format full race results for the given year."""
+    answer, _source = _resolve_race_results(user_query, history, year)
+    return answer
 
 
 def _handle_race_results_query(conversation_history: list[dict], user_query: str) -> bool:
@@ -518,7 +583,7 @@ def _handle_race_results_query(conversation_history: list[dict], user_query: str
 
     year = year_result["year"]
     print(f" [CSV] Looking up {year} race classification...")
-    answer = _format_race_results_response(user_query, conversation_history, year)
+    answer, source = _resolve_race_results(user_query, conversation_history, year)
     if is_multi_gp_clarification(answer):
         _maybe_ask_for_venue(
             conversation_history,
@@ -541,6 +606,7 @@ def _handle_race_results_query(conversation_history: list[dict], user_query: str
         race_lookup_query=user_query,
         country=country,
         location=location,
+        source=source,
     )
     return True
 
@@ -900,9 +966,23 @@ def _prior_turn_race_context(prior: dict) -> dict | None:
     query = prior.get("race_lookup_query") or prior.get("pending_query") or prior.get("query")
     if not query:
         return None
+    # Decline / session-prompt turns are not race lookups themselves.
+    if query.strip().lower() in {
+        "no", "nope", "nah", "skip", "continue", "race", "the race", "race results",
+    }:
+        query = prior.get("race_lookup_query") or prior.get("pending_query")
+        if not query:
+            return None
     year = prior.get("year") or _explicit_year(query)
     if year is None:
         return None
+    if prior.get("country"):
+        return {
+            "query": query,
+            "year": year,
+            "country": prior.get("country"),
+            "location": prior.get("location"),
+        }
     venue = resolve_venue(query=query)
     if venue["kind"] != "ok":
         return None
@@ -914,6 +994,27 @@ def _prior_turn_race_context(prior: dict) -> dict | None:
     }
 
 
+def _find_recent_race_turn(history: list[dict]) -> dict | None:
+    """Prefer the last race classification turn over session-prompt/decline replies."""
+    for turn in reversed(history):
+        answer = turn.get("answer") or ""
+        if turn.get("race_lookup_query") or _is_race_classification_answer(answer.split(session_results_offer())[0].strip()):
+            return turn
+        if _looks_like_race_results_answer(answer) and (
+            turn.get("year") is not None or turn.get("pending_query") or turn.get("country")
+        ):
+            # Skip pure session-choice prompts.
+            if "Reply with Qualifying or Sprint" in answer and "Classified finishers" not in answer:
+                continue
+            return turn
+    return None
+
+
+def _follow_up_anchor_turn(history: list[dict]) -> dict:
+    """Turn that should supply facts for a race follow-up."""
+    return _find_recent_race_turn(history) or history[-1]
+
+
 def _build_follow_up_lookup_context(
     user_query: str,
     history: list[dict],
@@ -922,7 +1023,7 @@ def _build_follow_up_lookup_context(
     if not history:
         return None
 
-    prior = history[-1]
+    prior = _follow_up_anchor_turn(history)
     driver_ctx = _prior_turn_driver_team_context(prior)
     if driver_ctx:
         year = _explicit_year(user_query)
@@ -943,7 +1044,7 @@ def _build_follow_up_lookup_context(
         return (
             "Use the FRESH LOOKUP DATA below to answer the follow-up.\n\n"
             f"FRESH LOOKUP DATA:\n{fresh}\n\n"
-            f"{_follow_up_context(history)}",
+            f"{_follow_up_context(history, prior=prior)}",
             csv_driver_teams(year=year),
         )
 
@@ -953,15 +1054,16 @@ def _build_follow_up_lookup_context(
             f" [Lookup] Re-fetching {race_ctx['year']} race classification "
             f"for follow-up verification..."
         )
-        fresh = _format_race_results_response(
+        fresh, source = _resolve_race_results(
             race_ctx["query"], history, race_ctx["year"],
         )
         return (
             "Use the FRESH LOOKUP DATA below to answer the follow-up. "
             "Prefer this data over the previous answer if they disagree.\n\n"
             f"FRESH LOOKUP DATA:\n{fresh}\n\n"
-            f"{_follow_up_context(history)}",
-            _csv_race_citation_from_query(
+            f"{_follow_up_context(history, prior=prior)}",
+            source
+            or _csv_race_citation_from_query(
                 race_ctx["query"],
                 race_ctx["year"],
                 country=race_ctx.get("country"),
@@ -977,7 +1079,7 @@ def _build_follow_up_lookup_context(
             return (
                 "Use the FRESH LOOKUP DATA below to answer the follow-up.\n\n"
                 f"FRESH LOOKUP DATA:\n{context}\n\n"
-                f"{_follow_up_context(history)}",
+                f"{_follow_up_context(history, prior=prior)}",
                 source,
             )
 
@@ -993,7 +1095,7 @@ def _build_follow_up_lookup_context(
             return (
                 "Use the FRESH LOOKUP DATA below to answer the follow-up.\n\n"
                 f"FRESH LOOKUP DATA:\n{result['context']}\n\n"
-                f"{_follow_up_context(history)}",
+                f"{_follow_up_context(history, prior=prior)}",
                 result["source"],
             )
 
@@ -1029,6 +1131,92 @@ def _try_driver_team_follow_up(user_query: str, history: list[dict]) -> dict | N
     }
 
 
+def _position_requested(user_query: str) -> int | None:
+    """Return finishing place (1-based) if the follow-up asks who finished there."""
+    q = user_query.lower()
+    mapping = (
+        (("winner", "who won", "1st", "first", "p1"), 1),
+        (("second", "2nd", "runner-up", "p2"), 2),
+        (("third", "3rd", "p3"), 3),
+        (("fourth", "4th", "p4"), 4),
+        (("fifth", "5th", "p5"), 5),
+        (("sixth", "6th", "p6"), 6),
+        (("seventh", "7th", "p7"), 7),
+        (("eighth", "8th", "p8"), 8),
+        (("ninth", "9th", "p9"), 9),
+        (("tenth", "10th", "p10"), 10),
+    )
+    for keys, place in mapping:
+        if any(key in q for key in keys):
+            return place
+    match = re.search(r"\b(?:p|position\s*)(\d{1,2})\b", q)
+    if match:
+        return int(match.group(1))
+    return None
+
+
+def _extract_finisher_line(answer: str, place: int) -> str | None:
+    """Pull `N. Driver (Team) - ...` from a race classification answer."""
+    body = answer.split(session_results_offer())[0]
+    body = body.split("\n\n— Source:")[0]
+    pattern = re.compile(rf"(?m)^{place}\.\s+.+$")
+    match = pattern.search(body)
+    if not match:
+        return None
+    return match.group(0).strip()
+
+
+def _try_position_follow_up(user_query: str, history: list[dict]) -> dict | None:
+    """Answer who finished P_n from the anchored race classification (no RAG wander)."""
+    place = _position_requested(user_query)
+    if place is None:
+        return None
+    prior = _follow_up_anchor_turn(history)
+    answer = prior.get("answer") or ""
+    line = _extract_finisher_line(answer, place)
+    race_ctx = _prior_turn_race_context(prior)
+
+    if line is None and race_ctx:
+        print(
+            f" [CSV] Position follow-up: re-fetching {race_ctx['year']} "
+            f"{race_ctx.get('country')} classification for P{place}..."
+        )
+        fresh, _source = _resolve_race_results(
+            race_ctx["query"], history, race_ctx["year"],
+        )
+        line = _extract_finisher_line(fresh, place)
+        answer = fresh
+
+    if not line:
+        return None
+
+    gp_match = re.search(r"results for the (.+?) are as follows", answer, re.I)
+    gp_label = gp_match.group(1).strip() if gp_match else "that Grand Prix"
+    ordinal = {1: "1st", 2: "2nd", 3: "3rd"}.get(place, f"{place}th")
+    response = f"In the {gp_label}, {ordinal} place was:\n{line}"
+    extra = {}
+    if race_ctx:
+        extra = {
+            "year": race_ctx["year"],
+            "race_lookup_query": race_ctx["query"],
+            "country": race_ctx.get("country"),
+            "location": race_ctx.get("location"),
+        }
+    elif prior.get("year") is not None:
+        extra = {
+            "year": prior.get("year"),
+            "race_lookup_query": prior.get("race_lookup_query") or prior.get("pending_query"),
+            "country": prior.get("country"),
+            "location": prior.get("location"),
+        }
+    return {
+        "category": "historical",
+        "answer": response,
+        "source": conversation_memory(),
+        **{k: v for k, v in extra.items() if v is not None},
+    }
+
+
 def _try_answer_follow_up(user_query: str, history: list[dict]) -> dict | None:
     """Answer a follow-up from memory or fresh lookup. Returns None to use normal routing."""
     if not _is_answer_follow_up(user_query, history):
@@ -1039,7 +1227,12 @@ def _try_answer_follow_up(user_query: str, history: list[dict]) -> dict | None:
         print(" [CSV] Driver-team follow-up answered from CSV lookup")
         return driver_follow_up
 
-    prior = history[-1]
+    position_follow_up = _try_position_follow_up(user_query, history)
+    if position_follow_up:
+        print(" [Memory] Position follow-up answered from race classification")
+        return position_follow_up
+
+    prior = _follow_up_anchor_turn(history)
     wants_lookup = _user_wants_fresh_lookup(user_query)
     sufficient = _prior_answer_likely_sufficient(user_query, prior.get("answer", ""))
 
@@ -1049,10 +1242,17 @@ def _try_answer_follow_up(user_query: str, history: list[dict]) -> dict | None:
         print(" [Memory] Follow-up answered from previous response")
         answer = generate_f1_response(
             user_query,
-            _follow_up_context(history),
+            _follow_up_context(history, prior=prior),
             history=history,
         )
-        return {"category": category, "answer": answer, "source": conversation_memory()}
+        extra = {}
+        race_ctx = _prior_turn_race_context(prior)
+        if race_ctx:
+            extra["year"] = race_ctx["year"]
+            extra["race_lookup_query"] = race_ctx["query"]
+            extra["country"] = race_ctx.get("country")
+            extra["location"] = race_ctx.get("location")
+        return {"category": category, "answer": answer, "source": conversation_memory(), **extra}
 
     reason = "user requested verification" if wants_lookup else "prior answer insufficient"
     print(f" [Memory] Follow-up needs fresh lookup ({reason})")
@@ -1073,16 +1273,21 @@ def _try_answer_follow_up(user_query: str, history: list[dict]) -> dict | None:
     if race_ctx:
         extra["year"] = race_ctx["year"]
         extra["race_lookup_query"] = race_ctx["query"]
+        extra["country"] = race_ctx.get("country")
+        extra["location"] = race_ctx.get("location")
     return {"category": category, "answer": answer, "source": source, **extra}
 
 
 def _is_answer_follow_up(user_query: str, history: list[dict]) -> bool:
-    """True when the user is likely asking about the immediately previous answer."""
-    if not history or not history[-1].get("answer"):
+    """True when the user is likely asking about a recent race/result answer."""
+    if not history:
+        return False
+    anchor = _follow_up_anchor_turn(history)
+    if not (anchor.get("answer") or history[-1].get("answer")):
         return False
     if is_country_race_listing_query(user_query):
         return False
-    prior_answer = history[-1].get("answer", "")
+    prior_answer = anchor.get("answer") or history[-1].get("answer", "")
     if query_introduces_new_country(user_query, prior_answer):
         return False
     if _is_race_results_query(user_query):
@@ -1115,12 +1320,13 @@ def _is_answer_follow_up(user_query: str, history: list[dict]) -> bool:
     return len(q.split()) <= 8 and q.endswith("?")
 
 
-def _follow_up_context(history: list[dict]) -> str:
-    prior = history[-1]
+def _follow_up_context(history: list[dict], prior: dict | None = None) -> str:
+    prior = prior or _follow_up_anchor_turn(history)
     return (
         "Answer the follow-up using ONLY the previous exchange below. "
+        "Stay on this exact Grand Prix / session — do not switch to other races. "
         "Do not invent facts that are not already in the previous answer.\n\n"
-        f"PREVIOUS USER QUESTION:\n{prior['query']}\n\n"
+        f"PREVIOUS USER QUESTION:\n{prior.get('race_lookup_query') or prior['query']}\n\n"
         f"PREVIOUS ANSWER:\n{prior['answer']}"
     )
 
@@ -1853,7 +2059,7 @@ def _handle_venue_clarification_resume(conversation_history: list[dict], user_qu
 
         print(f" [Router] Resuming race-results query after venue clarification")
         print(f" [CSV] Looking up {year} race classification...")
-        answer = _format_race_results_response(enriched_query, conversation_history, year)
+        answer, source = _resolve_race_results(enriched_query, conversation_history, year)
         _respond_race_results_with_session_offer(
             conversation_history,
             user_query,
@@ -1862,6 +2068,7 @@ def _handle_venue_clarification_resume(conversation_history: list[dict], user_qu
             race_lookup_query=enriched_query,
             country=venue["country"],
             location=venue.get("location"),
+            source=source,
         )
         return True
 
@@ -2099,7 +2306,7 @@ def process_query(conversation_history: list[dict], user_query: str) -> dict | N
         _handle_venue_clarification_resume(conversation_history, user_query)
         return current_response(conversation_history)
 
-    if awaiting_session and not _should_abandon_session_choice(user_query):
+    if awaiting_session and not _should_abandon_session_choice(user_query, conversation_history):
         _handle_session_choice_resume(conversation_history, user_query)
         return current_response(conversation_history)
 
@@ -2172,7 +2379,7 @@ def process_query(conversation_history: list[dict], user_query: str) -> dict | N
             ):
                 return current_response(conversation_history)
             print(f" [CSV] Looking up {year} race classification...")
-            answer = _format_race_results_response(original_query, conversation_history, year)
+            answer, source = _resolve_race_results(original_query, conversation_history, year)
             if is_multi_gp_clarification(answer):
                 _ask_for_venue_clarification(
                     conversation_history,
@@ -2194,6 +2401,7 @@ def process_query(conversation_history: list[dict], user_query: str) -> dict | N
                 race_lookup_query=original_query,
                 country=country,
                 location=location,
+                source=source,
             )
             return current_response(conversation_history)
 

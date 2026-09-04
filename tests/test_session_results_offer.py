@@ -11,6 +11,7 @@ class TestSessionResultsOffer(unittest.TestCase):
         self.assertEqual(parse_session_choice("qualifying"), "Qualifying")
         self.assertEqual(parse_session_choice("sprint race"), "Sprint")
         self.assertEqual(parse_session_choice("no"), "decline")
+        self.assertEqual(parse_session_choice("Race"), "decline")
         self.assertIsNone(parse_session_choice("who won the title in 2020"))
 
     def test_race_classification_answer_detection(self):

@@ -26,6 +26,12 @@ DECLINE_REPLIES = {
     "that's fine",
     "thats fine",
     "all good",
+    # User already has race results — treat "race" as declining the Qualifying/Sprint offer.
+    "race",
+    "the race",
+    "race results",
+    "just the race",
+    "race is fine",
 }
 
 
