@@ -68,9 +68,28 @@ def _boot() -> None:
         print(f" [API] Startup failed: {exc}")
 
 
+def _boot_lightweight() -> None:
+    """Mark the API ready without loading torch/embeddings (free-tier friendly)."""
+    global _ready, _ready_error
+    try:
+        from utils.currency import refresh_exchange_rates
+
+        refresh_exchange_rates()
+        _ready = True
+        print(
+            f" [API] Racecoe ready [{active_model_label()}] "
+            "(embedding warmup skipped; RAG loads on first use)."
+        )
+    except Exception as exc:
+        _ready_error = str(exc)
+        print(f" [API] Startup failed: {exc}")
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    if os.environ.get("F1_SKIP_WARMUP") != "1":
+    if os.environ.get("F1_SKIP_WARMUP") == "1":
+        threading.Thread(target=_boot_lightweight, daemon=True).start()
+    else:
         threading.Thread(target=_boot, daemon=True).start()
     yield
 

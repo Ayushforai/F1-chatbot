@@ -7,13 +7,9 @@
 # 3. In Render dashboard, set those as secret env vars (or fill below as sync:false)
 #
 # Image includes data/historical_csvs + vector_store FAISS indexes from the repo.
-# Free (512MB) OOMs loading torch + bge-base embeddings — use Standard (2GB).
-
-services:
-  - type: web
-    name: racecoe
-    runtime: docker
-    plan: standard
+# Free (512MB) cannot hold torch + bge-base at once. Stay on free with
+# F1_SKIP_WARMUP=1 so the port binds; upgrade to Standard (2GB) for full RAG warmup.
+    plan: free
     healthCheckPath: /api/health
     envVars:
       - key: LLM_PROVIDER
@@ -24,6 +20,8 @@ services:
         value: LOW
       - key: HOST
         value: 0.0.0.0
+      - key: F1_SKIP_WARMUP
+        value: "1"
       # Render injects PORT; keep HOST=0.0.0.0 so uvicorn binds correctly.
       - key: CORS_ORIGINS
         sync: false
