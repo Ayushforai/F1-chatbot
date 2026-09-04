@@ -8,12 +8,23 @@ Racecoe uses **different LLM setups** for local development and cloud deployment
 
 | Environment | LLM | Notes |
 |-------------|-----|--------|
-| **Local development** | [Ollama](https://ollama.com/) with `qwen2.5:7b-instruct-q8_0` | Runs entirely on your machine. No cloud API key required for chat generation. |
-| **Deployed / production** | **Groq** or **Google Gemini** (cloud API) | Ollama is not practical on typical free/cloud hosts. Production switches to a hosted LLM via API keys in environment variables. |
+| **Local development** | [Ollama](https://ollama.com/) with `qwen2.5:7b-instruct-q8_0` | Set `LLM_PROVIDER=ollama` (default). No cloud API key required. |
+| **Deployed / production** | **Gemini** (recommended) or **Groq** | Set `LLM_PROVIDER=gemini` or `groq` plus the matching API key. |
 
-**Why the switch?** Local Ollama needs a capable machine and a long-running model process. Deployed Racecoe uses Groq or Gemini so the app can run in Docker on Railway, Render, Hugging Face Spaces, or similar without shipping a local LLM binary.
+One codebase supports both via `utils/llm.py` (`LLM_PROVIDER` + optional `LLM_MODEL`).
 
-Embeddings stay on **Hugging Face** (`BAAI/bge-base-en-v1.5`) in both environments (set `HF_TOKEN` in `.env`).
+### Which cloud API is best for Racecoe?
+
+| Provider | Best for Racecoe? | Why |
+|----------|-------------------|-----|
+| **Google Gemini** | **Recommended default for deploy** | Strong free tier, good instruction-following for “answer only from context”, solid JSON extraction for routing. |
+| **Groq** | Excellent alternative | Very fast and cheap/free-tier friendly; great for low-latency chat. Slightly less deliberate than Gemini on long regulation answers. |
+| **OpenAI** | Best if you pay | Highest general quality (`gpt-4o-mini` is a strong paid baseline), but not the best free-deploy choice. |
+| **Grok (xAI)** | Not recommended here | Fun conversational model, weaker fit for strict factual RAG / “never invent results” behaviour. Supported via `LLM_PROVIDER=grok` if you still want it. |
+
+**Practical pick:** use **Ollama locally**, **Gemini in production**. Keep Groq as a fast fallback by switching `LLM_PROVIDER`.
+
+Embeddings stay on **Hugging Face** (`BAAI/bge-base-en-v1.5`) in both environments (set `HF_TOKEN`).
 
 ## Features
 
@@ -58,10 +69,33 @@ Embeddings stay on **Hugging Face** (`BAAI/bge-base-en-v1.5`) in both environmen
 - Hugging Face read token (for embedding model downloads)
 
 ### Production / deploy
-- Docker (recommended) or a Python host that can run FastAPI + the frontend build
-- Cloud LLM API access: **Groq** and/or **Google Gemini**
-- Environment secrets: `HF_TOKEN`, plus provider keys such as `GROQ_API_KEY` or `GEMINI_API_KEY`
-- Outbound HTTPS for OpenF1, Hugging Face, currency FX, and the chosen LLM API
+- Docker (recommended) — see `Dockerfile`
+- Cloud LLM: **Gemini** (recommended) or **Groq**
+- Host secrets: `HF_TOKEN`, `GEMINI_API_KEY` or `GROQ_API_KEY`, optional `CORS_ORIGINS`
+- Outbound HTTPS for OpenF1, Hugging Face, currency FX, and the LLM API
+- Built FAISS indexes (`vector_store/`) available in the Docker build context
+
+### Deploy checklist
+
+1. Set `LLM_PROVIDER=gemini` (or `groq`) and the API key on the host  
+2. Set `HF_TOKEN` and production `CORS_ORIGINS`  
+3. Ensure `vector_store/` indexes exist locally (`pdf_processor.py`, `historical_processor.py`)  
+4. `docker build -t racecoe .` (frontend build + Python image)  
+5. Run with `PORT` / `HOST=0.0.0.0` (Compose/Railway/Render inject `PORT`)  
+6. Confirm `/api/health` returns `ready` + `provider`  
+7. Smoke test: `python scripts/smoke_deploy.py` (or `--http` against the live URL)  
+8. Ask Monaco 2021 → “who was third?” and confirm Lando Norris without a session re-prompt  
+
+```bash
+# Example local production-shaped run (Gemini)
+export LLM_PROVIDER=gemini
+export GEMINI_API_KEY=...
+export HF_TOKEN=...
+export HOST=0.0.0.0
+export PORT=8000
+export CORS_ORIGINS=http://localhost:8000
+uvicorn server:app --host 0.0.0.0 --port 8000
+```
 
 ## Setup (local)
 
@@ -165,6 +199,7 @@ data/
     F1DriversDataset.csv # Canonical driver names for text matching (no car numbers)
 utils/
   router.py             # Intent classification + parameter extraction
+  llm.py                # LLM_PROVIDER abstraction (ollama / gemini / groq / openai / grok)
   driver_names.py       # F1DriversDataset name resolution
   driver_numbers.py     # Driver name → car number resolution
   f1_api.py             # OpenF1 API client + lap time formatting
@@ -236,9 +271,9 @@ python app.py
 
 | Setup | Recommendation |
 |-------|----------------|
-| **Local LLM** | Use **Ollama** (`qwen2.5:7b-instruct-q8_0`) while developing on your machine. |
-| **Production LLM** | Switch to **Groq** or **Google Gemini** via API keys. Do not rely on Ollama inside typical cloud free tiers. |
-| **Packaging** | Prefer **Docker**: bake `vector_store/`, CSVs, and the frontend build (`frontend/dist`) into the image; run `uvicorn server:app --host 0.0.0.0 --port $PORT`. |
+| **Local LLM** | Use **Ollama** (`LLM_PROVIDER=ollama`, model `qwen2.5:7b-instruct-q8_0`). |
+| **Production LLM** | Use **Gemini** (`LLM_PROVIDER=gemini`) or **Groq**. Do not rely on Ollama on typical cloud free tiers. |
+| **Packaging** | Prefer **Docker** (`Dockerfile`): builds the React app, copies CSVs + `vector_store/`, runs `uvicorn server:app --host 0.0.0.0 --port $PORT`. |
 | **Long-running API server** | Keep one process alive. Embedding weights load once at boot and serve all RAG queries until shutdown. |
 | **Hugging Face cache** | Mount or bake `~/.cache/huggingface`, or set `HF_HOME`, so embedding weights persist across container restarts. |
 | **Serverless / scale-to-zero** | Every cold start reloads the embedding model unless you use provisioned concurrency or a managed embedding API. |
