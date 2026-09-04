@@ -9,35 +9,33 @@ Racecoe uses **different LLM setups** for local development and cloud deployment
 | Environment | LLM | Notes |
 |-------------|-----|--------|
 | **Local development** | [Ollama](https://ollama.com/) with `qwen2.5:7b-instruct-q8_0` | Set `LLM_PROVIDER=ollama` (default). No cloud API key required. |
-| **Deployed / production** | **Gemini 3.6 Flash** (`gemini-3.6-flash`) | Set `LLM_PROVIDER=gemini` + `GEMINI_API_KEY`. Override with `LLM_MODEL` for Lite / 3.8 Flash / 3.1 Pro. |
+| **Deployed / production** | **Gemini 3.8 Flash** (`gemini-3.8-flash`) | Set `LLM_PROVIDER=gemini` + `GEMINI_API_KEY`. Free tier is rate-limited (RPM/TPM/RPD). |
 
 One codebase supports both via `utils/llm.py` (`LLM_PROVIDER` + optional `LLM_MODEL`).
 
-### Why not Gemini 2.0 Flash?
+### Why Gemini 3.8 Flash?
 
-We originally defaulted to `gemini-2.0-flash` as a safe generic ID. That model is outdated (retired mid-2026). Racecoe now defaults to **`gemini-3.6-flash`**.
+`gemini-3.8-flash` is the newest Flash workhorse and is available on the Gemini API free tier (rate-limited). Racecoe defaults to it for deploy. Older IDs like `gemini-3.6-flash` still work via `LLM_MODEL`.
 
 ### Google One Plus vs Gemini API
 
-The models you see in the **Gemini app** with Google One Plus (Flash 3.6 Lite, Flash 3.6, 3.1 Pro) are **consumer product names**. Racecoe talks to the **Gemini Developer API**, which uses model IDs like:
+The models you see in the **Gemini app** with Google One Plus are **consumer product names**. Racecoe talks to the **Gemini Developer API**, which uses model IDs like:
 
 | What you see in Gemini app | Typical API model ID |
 |----------------------------|----------------------|
-| Flash 3.6 / Flash | `gemini-3.6-flash` (**Racecoe default**) |
-| Flash 3.6 Lite / Flash Lite | `gemini-3.5-flash-lite` (or newer lite ID your project lists) |
+| Flash 3.8 / latest Flash | `gemini-3.8-flash` (**Racecoe default**) |
+| Flash 3.6 | `gemini-3.6-flash` |
+| Flash Lite | `gemini-3.5-flash-lite` (or newer lite ID your project lists) |
 | 3.1 Pro | `gemini-3.1-pro-preview` |
-| Newer Flash (e.g. 3.8) | `gemini-3.8-flash` |
 
-Google One subscription does **not** automatically give your Docker app those models. You still need a **`GEMINI_API_KEY`** from [Google AI Studio](https://aistudio.google.com/apikey). Once you have the key, you can use the same generation of models via `LLM_MODEL`.
-
-**Racecoe recommendation:** keep **`gemini-3.6-flash`** for deploy (fast + strong for RAG/JSON). Use **3.1 Pro** only if answers need deeper reasoning and you accept more latency/cost:
+Google One subscription does **not** automatically give your Docker app those models. You still need a **`GEMINI_API_KEY`** from [Google AI Studio](https://aistudio.google.com/apikey).
 
 ```bash
 export LLM_PROVIDER=gemini
 export GEMINI_API_KEY=...
-export LLM_MODEL=gemini-3.6-flash          # default
+export LLM_MODEL=gemini-3.8-flash          # default
+export GEMINI_THINKING_LEVEL=LOW           # LOW|MEDIUM|HIGH for 3.8
 # export LLM_MODEL=gemini-3.1-pro-preview  # optional heavier model
-# export LLM_MODEL=gemini-3.8-flash        # if available on your API project
 ```
 
 Embeddings stay on **Hugging Face** (`BAAI/bge-base-en-v1.5`) in both environments (set `HF_TOKEN`).
@@ -93,23 +91,33 @@ Embeddings stay on **Hugging Face** (`BAAI/bge-base-en-v1.5`) in both environmen
 
 ### Deploy checklist
 
-1. Set `LLM_PROVIDER=gemini` (or `groq`) and the API key on the host  
-2. Set `HF_TOKEN` and production `CORS_ORIGINS`  
-3. Ensure `vector_store/` indexes exist locally (`pdf_processor.py`, `historical_processor.py`)  
-4. `docker build -t racecoe .` (frontend build + Python image)  
-5. Run with `PORT` / `HOST=0.0.0.0` (Compose/Railway/Render inject `PORT`)  
-6. Confirm `/api/health` returns `ready` + `provider`  
-7. Smoke test: `python scripts/smoke_deploy.py` (or `--http` against the live URL)  
-8. Ask Monaco 2021 → “who was third?” and confirm Lando Norris without a session re-prompt  
+1. Create a **Gemini API key** at https://aistudio.google.com/apikey (Google One alone is not enough)  
+2. Create an **HF_TOKEN** at https://huggingface.co/settings/tokens  
+3. Put both in `.env` (never commit `.env`):
+   ```bash
+   LLM_PROVIDER=gemini
+   LLM_MODEL=gemini-3.8-flash
+   GEMINI_API_KEY=...
+   HF_TOKEN=...
+   ```
+4. Build FAISS indexes locally if needed (`pdf_processor.py`, `historical_processor.py`)  
+5. Run locally in production shape:
+   ```bash
+   docker compose up --build
+   # open http://127.0.0.1:8000 — check /api/health
+   ```
+6. Deploy with Docker to **Render** (uses `render.yaml`) or Railway / HF Spaces  
+7. Set secret env vars on the host: `GEMINI_API_KEY`, `HF_TOKEN`, optional `CORS_ORIGINS`  
+8. Smoke test: `python scripts/smoke_deploy.py --http --base-url https://YOUR-URL`
 
 ```bash
-# Example local production-shaped run (Gemini)
+# Example without Docker
 export LLM_PROVIDER=gemini
+export LLM_MODEL=gemini-3.8-flash
 export GEMINI_API_KEY=...
 export HF_TOKEN=...
 export HOST=0.0.0.0
 export PORT=8000
-export CORS_ORIGINS=http://localhost:8000
 uvicorn server:app --host 0.0.0.0 --port 8000
 ```
 
@@ -288,7 +296,7 @@ python app.py
 | Setup | Recommendation |
 |-------|----------------|
 | **Local LLM** | Use **Ollama** (`LLM_PROVIDER=ollama`, model `qwen2.5:7b-instruct-q8_0`). |
-| **Production LLM** | Use **Gemini 3.6 Flash** (`LLM_PROVIDER=gemini`, `LLM_MODEL=gemini-3.6-flash`). Override to Lite / 3.8 Flash / 3.1 Pro via `LLM_MODEL`. |
+| **Production LLM** | Use **Gemini 3.8 Flash** (`LLM_PROVIDER=gemini`, `LLM_MODEL=gemini-3.8-flash`). Free tier is rate-limited. |
 | **Packaging** | Prefer **Docker** (`Dockerfile`): builds the React app, copies CSVs + `vector_store/`, runs `uvicorn server:app --host 0.0.0.0 --port $PORT`. |
 | **Long-running API server** | Keep one process alive. Embedding weights load once at boot and serve all RAG queries until shutdown. |
 | **Hugging Face cache** | Mount or bake `~/.cache/huggingface`, or set `HF_HOME`, so embedding weights persist across container restarts. |

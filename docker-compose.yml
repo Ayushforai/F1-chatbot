@@ -1,0 +1,33 @@
+# Local production-shaped run for Racecoe.
+# Usage:
+#   cp .env.example .env   # set GEMINI_API_KEY + HF_TOKEN
+#   docker compose up --build
+
+services:
+  racecoe:
+    build: .
+    ports:
+      - "${PORT:-8000}:8000"
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "8000"
+      LLM_PROVIDER: gemini
+      LLM_MODEL: gemini-3.8-flash
+      GEMINI_THINKING_LEVEL: LOW
+      CORS_ORIGINS: ${CORS_ORIGINS:-*}
+      HF_TOKEN: ${HF_TOKEN:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      RAG_WARMUP_CATEGORIES: ${RAG_WARMUP_CATEGORIES:-}
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health')",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 120s
+    restart: unless-stopped

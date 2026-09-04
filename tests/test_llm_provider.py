@@ -15,9 +15,36 @@ class TestLlmProviderAbstraction(unittest.TestCase):
             self.assertIn("qwen", llm.get_model_name("ollama"))
 
     def test_provider_env_override(self):
-        with patch.dict(os.environ, {"LLM_PROVIDER": "gemini", "LLM_MODEL": "gemini-3.6-flash"}, clear=False):
+        with patch.dict(os.environ, {"LLM_PROVIDER": "gemini", "LLM_MODEL": "gemini-3.8-flash"}, clear=False):
             self.assertEqual(llm.get_provider(), "gemini")
-            self.assertEqual(llm.get_model_name(), "gemini-3.6-flash")
+            self.assertEqual(llm.get_model_name(), "gemini-3.8-flash")
+
+    def test_gemini_38_sends_thinking_level(self):
+        fake = {
+            "candidates": [
+                {"content": {"parts": [{"text": "ok"}]}}
+            ]
+        }
+        with patch.dict(
+            os.environ,
+            {
+                "LLM_PROVIDER": "gemini",
+                "GEMINI_API_KEY": "test-key",
+                "LLM_MODEL": "gemini-3.8-flash",
+                "GEMINI_THINKING_LEVEL": "LOW",
+            },
+            clear=False,
+        ), patch("utils.llm.requests.post") as post:
+            post.return_value.status_code = 200
+            post.return_value.json.return_value = fake
+            post.return_value.text = "ok"
+            result = llm.generate(system="sys", prompt="hi")
+        self.assertEqual(result["response"], "ok")
+        body = post.call_args.kwargs["json"]
+        self.assertEqual(
+            body["generationConfig"]["thinkingConfig"]["thinkingLevel"],
+            "LOW",
+        )
 
     def test_gemini_requires_api_key(self):
         with patch.dict(

@@ -16,9 +16,9 @@ DEFAULT_PROVIDER = "ollama"
 DEFAULT_MODELS = {
     "ollama": "qwen2.5:7b-instruct-q8_0",
     "groq": "llama-3.3-70b-versatile",
-    # Prefer current Gemini 3.x Flash for deploy. Override with LLM_MODEL if needed:
-    # gemini-3.6-flash-lite | gemini-3.8-flash | gemini-3.1-pro-preview
-    "gemini": "gemini-3.6-flash",
+    # Deploy default: newest free-tier Flash. Override with LLM_MODEL if needed:
+    # gemini-3.6-flash | gemini-3.5-flash-lite | gemini-3.1-pro-preview
+    "gemini": "gemini-3.8-flash",
     "openai": "gpt-4o-mini",
     "grok": "grok-2-latest",
 }
@@ -210,6 +210,14 @@ def _generate_gemini(
     }
     if json_mode:
         generation_config["responseMimeType"] = "application/json"
+
+    # Gemini 3.8+ expects a thinking level (LOW|MEDIUM|HIGH). Default LOW for
+    # faster / cheaper routing + RAG answers; override with GEMINI_THINKING_LEVEL.
+    if model.startswith("gemini-3.8") or model.startswith("gemini-3.7"):
+        level = (os.getenv("GEMINI_THINKING_LEVEL") or "LOW").strip().upper()
+        if level not in {"LOW", "MEDIUM", "HIGH"}:
+            level = "LOW"
+        generation_config["thinkingConfig"] = {"thinkingLevel": level}
 
     body: dict[str, Any] = {
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
