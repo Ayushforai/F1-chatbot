@@ -7,13 +7,13 @@
 # 3. In Render dashboard, set those as secret env vars (or fill below as sync:false)
 #
 # Image includes data/historical_csvs + vector_store FAISS indexes from the repo.
-# Free tier sleeps when idle; first request after wake can take minutes (embedding warmup).
+# Free (512MB) OOMs loading torch + bge-base embeddings — use Standard (2GB).
 
 services:
   - type: web
     name: racecoe
     runtime: docker
-    plan: free
+    plan: standard
     healthCheckPath: /api/health
     envVars:
       - key: LLM_PROVIDER
@@ -33,3 +33,7 @@ services:
         sync: false
       - key: RAG_WARMUP_CATEGORIES
         value: historical,sporting,financial
+      - key: OMP_NUM_THREADS
+        value: "1"
+      - key: TOKENIZERS_PARALLELISM
+        value: "false"

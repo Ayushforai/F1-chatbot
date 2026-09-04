@@ -16,13 +16,15 @@ class EmbeddingAuthTests(unittest.TestCase):
         with patch.dict(os.environ, {**env, "HUGGING_FACE_HUB_TOKEN": "hf_hub"}, clear=True):
             self.assertEqual(_hf_token(), "hf_hub")
 
-    @patch("utils.embeddings.HuggingFaceEmbeddings")
+    @patch("langchain_huggingface.HuggingFaceEmbeddings")
     def test_get_embeddings_passes_token_when_set(self, mock_embeddings):
+        clear_embeddings_cache()
         with patch.dict(os.environ, {"HF_TOKEN": "hf_test"}, clear=False):
             get_embeddings()
         model_kwargs = mock_embeddings.call_args.kwargs["model_kwargs"]
         self.assertEqual(model_kwargs["token"], "hf_test")
         self.assertEqual(model_kwargs["device"], "cpu")
+        clear_embeddings_cache()
 
     @patch("utils.embeddings._build_embeddings")
     def test_get_embeddings_is_singleton(self, mock_build):

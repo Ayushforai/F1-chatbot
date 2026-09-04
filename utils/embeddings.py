@@ -2,14 +2,13 @@ import os
 from pathlib import Path
 
 from dotenv import load_dotenv
-from langchain_huggingface import HuggingFaceEmbeddings
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 load_dotenv(_PROJECT_ROOT / ".env")
 
 EMBEDDING_MODEL = "BAAI/bge-base-en-v1.5"
 
-_embeddings: HuggingFaceEmbeddings | None = None
+_embeddings = None
 
 
 def _hf_token() -> str | None:
@@ -20,7 +19,10 @@ def _hf_token() -> str | None:
     return token
 
 
-def _build_embeddings() -> HuggingFaceEmbeddings:
+def _build_embeddings():
+    # Lazy import so uvicorn can bind PORT before torch loads (critical on small hosts).
+    from langchain_huggingface import HuggingFaceEmbeddings
+
     # CPU avoids MPS instability with sentence-transformers on macOS.
     model_kwargs: dict = {"device": "cpu"}
     token = _hf_token()
@@ -34,7 +36,7 @@ def _build_embeddings() -> HuggingFaceEmbeddings:
     )
 
 
-def get_embeddings() -> HuggingFaceEmbeddings:
+def get_embeddings():
     """Return a process-wide cached embedding model (weights load once)."""
     global _embeddings
     if _embeddings is None:
@@ -42,7 +44,7 @@ def get_embeddings() -> HuggingFaceEmbeddings:
     return _embeddings
 
 
-def preload_embeddings() -> HuggingFaceEmbeddings:
+def preload_embeddings():
     """Eagerly load embedding weights. Call once at process startup."""
     return get_embeddings()
 
