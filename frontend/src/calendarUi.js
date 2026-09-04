@@ -19,11 +19,16 @@ export function formatWeekend(startIso, endIso) {
   return `${startDay} ${startMon} - ${endDay} ${endMon}`;
 }
 
-export function nextRoundIndex(races) {
-  const today = new Date();
+export function startOfDay(date) {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+}
+
+/** Index of the upcoming round: stays on race day until the main race date has passed. */
+export function nextRoundIndex(races, now = new Date()) {
+  const today = startOfDay(now);
   const idx = races.findIndex((race) => {
-    const date = parseIsoDate(race.date || race.weekend_end);
-    return date && date >= new Date(today.getFullYear(), today.getMonth(), today.getDate());
+    const raceDay = parseIsoDate(race.date) || parseIsoDate(race.weekend_end);
+    return raceDay && raceDay >= today;
   });
   return idx === -1 ? Math.max(0, races.length - 1) : idx;
 }

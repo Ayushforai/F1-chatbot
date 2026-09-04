@@ -1448,7 +1448,18 @@ def generate_f1_response(
         )
         return response["response"]
     except Exception as e:
-        return f"Telemetry stream interrupted. Error: {e}"
+        msg = str(e)
+        if "503" in msg or "high demand" in msg.lower() or "UNAVAILABLE" in msg:
+            return (
+                "The language model is temporarily overloaded. "
+                "Please try again in a few seconds."
+            )
+        if "429" in msg or "rate" in msg.lower():
+            return (
+                "The language model rate limit was hit. "
+                "Please wait a moment and try again."
+            )
+        return f"Could not generate an answer right now. Error: {e}"
 
 
 def _has_driver(driver) -> bool:

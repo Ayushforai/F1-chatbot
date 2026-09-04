@@ -1,6 +1,6 @@
 import os
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 os.environ.setdefault("F1_SKIP_WARMUP", "1")
 
@@ -9,8 +9,9 @@ import utils.llm as llm
 
 class TestLlmProviderAbstraction(unittest.TestCase):
     def test_default_provider_is_ollama(self):
-        with patch.dict(os.environ, {"LLM_PROVIDER": ""}, clear=False):
+        with patch.dict(os.environ, {"LLM_PROVIDER": "", "LLM_MODEL": ""}, clear=False):
             os.environ.pop("LLM_PROVIDER", None)
+            os.environ.pop("LLM_MODEL", None)
             self.assertEqual(llm.get_provider(), "ollama")
             self.assertIn("qwen", llm.get_model_name("ollama"))
 
@@ -90,6 +91,58 @@ class TestLlmProviderAbstraction(unittest.TestCase):
             cfg = llm.describe_config()
         self.assertEqual(cfg["provider"], "openai")
         self.assertEqual(cfg["has_api_key"], "yes")
+
+    def test_gemini_retries_then_succeeds_on_503(self):
+        ok = {"candidates": [{"content": {"parts": [{"text": "recovered"}]}}]}
+        fail = Mock(status_code=503, text='{"error":{"message":"high demand"}}')
+        success = Mock(status_code=200, text="ok")
+        success.json.return_value = ok
+
+        with patch.dict(
+            os.environ,
+            {
+                "LLM_PROVIDER": "gemini",
+                "GEMINI_API_KEY": "test-key",
+                "LLM_MODEL": "gemini-3.8-flash",
+                "LLM_RETRY_ATTEMPTS": "3",
+            },
+            clear=False,
+        ), patch("utils.llm.requests.post", side_effect=[fail, success]) as post, patch(
+            "utils.llm.time.sleep"
+        ) as sleep:
+            result = llm.generate(system="sys", prompt="hi")
+
+        self.assertEqual(result["response"], "recovered")
+        self.assertEqual(post.call_count, 2)
+        sleep.assert_called()
+
+    def test_gemini_falls_back_to_next_model_after_503(self):
+        ok = {"candidates": [{"content": {"parts": [{"text": "from-fallback"}]}}]}
+        fail = Mock(status_code=503, text="high demand")
+        success = Mock(status_code=200, text="ok")
+        success.json.return_value = ok
+
+        with patch.dict(
+            os.environ,
+            {
+                "LLM_PROVIDER": "gemini",
+                "GEMINI_API_KEY": "test-key",
+                "LLM_MODEL": "gemini-3.8-flash",
+                "LLM_RETRY_ATTEMPTS": "1",
+                "GEMINI_FALLBACK_MODELS": "gemini-2.0-flash",
+            },
+            clear=False,
+        ), patch("utils.llm.requests.post", side_effect=[fail, success]) as post, patch(
+            "utils.llm.time.sleep"
+        ):
+            result = llm.generate(system="sys", prompt="hi")
+
+        self.assertEqual(result["response"], "from-fallback")
+        self.assertEqual(post.call_count, 2)
+        first_url = post.call_args_list[0].args[0]
+        second_url = post.call_args_list[1].args[0]
+        self.assertIn("gemini-3.8-flash", first_url)
+        self.assertIn("gemini-2.0-flash", second_url)
 
 
 if __name__ == "__main__":

@@ -489,29 +489,54 @@ def fetch_year_meetings(year: int) -> list[dict]:
         return []
     meetings = _payload_list(res.json())
     meetings.sort(key=lambda row: str(row.get("date_start") or ""))
+
+    race_dates: dict[int, str] = {}
+    try:
+        race_res = requests.get(
+            f"{BASE_URL}/sessions",
+            params={"year": year, "session_name": "Race"},
+            timeout=12,
+        )
+        if race_res.status_code == 200:
+            for session in _payload_list(race_res.json()):
+                meeting_key = session.get("meeting_key")
+                date_start = str(session.get("date_start") or "")[:10]
+                if meeting_key is not None and date_start:
+                    race_dates[int(meeting_key)] = date_start
+    except requests.RequestException:
+        pass
+
     races = []
     for index, meeting in enumerate(meetings, start=1):
-        date = str(meeting.get("date_start") or "")[:10]
-        weekend_end = date
-        try:
-            weekend_end = (
-                datetime.strptime(date, "%Y-%m-%d") + timedelta(days=2)
-            ).date().isoformat()
-        except ValueError:
-            pass
+        weekend_start = str(meeting.get("date_start") or "")[:10]
+        meeting_key = meeting.get("meeting_key")
+        race_day = ""
+        if meeting_key is not None:
+            race_day = race_dates.get(int(meeting_key), "")
+        if not race_day:
+            race_day = _add_days_openf1(weekend_start, 2)
         races.append(
             {
                 "round": index,
                 "name": meeting.get("meeting_name") or meeting.get("circuit_short_name") or "Grand Prix",
-                "date": date,
-                "weekend_start": date,
-                "weekend_end": weekend_end,
+                "date": race_day or weekend_start,
+                "weekend_start": weekend_start,
+                "weekend_end": race_day or weekend_start,
                 "circuit": meeting.get("circuit_short_name") or "",
                 "location": meeting.get("location") or "",
                 "country": meeting.get("country_name") or "",
             }
         )
     return races
+
+
+def _add_days_openf1(iso: str, days: int) -> str:
+    if not iso:
+        return ""
+    try:
+        return (datetime.strptime(iso, "%Y-%m-%d") + timedelta(days=days)).date().isoformat()
+    except ValueError:
+        return iso
 
 
 def get_openf1_session_classification(

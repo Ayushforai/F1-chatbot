@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import json
 import os
+import time
 from typing import Any
 
 import requests
@@ -22,6 +22,15 @@ DEFAULT_MODELS = {
     "openai": "gpt-4o-mini",
     "grok": "grok-2-latest",
 }
+
+# Tried in order after the primary model when Gemini returns 429/5xx overload.
+DEFAULT_GEMINI_FALLBACKS = (
+    "gemini-3.6-flash",
+    "gemini-2.0-flash",
+)
+
+# Transient Google / proxy failures worth retrying.
+_RETRYABLE_HTTP = {429, 500, 502, 503, 504}
 
 OPENAI_COMPAT_BASES = {
     "groq": "https://api.groq.com/openai/v1",
@@ -138,6 +147,52 @@ def _generate_ollama(
     return {"response": response.get("response", "")}
 
 
+def _retry_attempts() -> int:
+    raw = (os.getenv("LLM_RETRY_ATTEMPTS") or "3").strip()
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 3
+
+
+def _gemini_model_chain(primary: str) -> list[str]:
+    """Primary model first, then env/default fallbacks (deduped)."""
+    env = (os.getenv("GEMINI_FALLBACK_MODELS") or "").strip()
+    if env:
+        extras = [m.strip() for m in env.split(",") if m.strip()]
+    else:
+        extras = list(DEFAULT_GEMINI_FALLBACKS)
+    chain: list[str] = []
+    for name in [primary, *extras]:
+        if name and name not in chain:
+            chain.append(name)
+    return chain
+
+
+def _post_with_retries(
+    *,
+    label: str,
+    do_post,
+    attempts: int | None = None,
+) -> Any:
+    """Retry transient HTTP failures with exponential backoff."""
+    attempts = attempts if attempts is not None else _retry_attempts()
+    last_error: Exception | None = None
+    for attempt in range(attempts):
+        response = do_post()
+        if response.status_code < 400:
+            return response
+        snippet = (response.text or "")[:400]
+        err = RuntimeError(f"{label} API error {response.status_code}: {snippet}")
+        last_error = err
+        if response.status_code not in _RETRYABLE_HTTP or attempt >= attempts - 1:
+            raise err
+        # 0.8s, 1.6s, 3.2s… — enough for brief Gemini overload spikes
+        time.sleep(0.8 * (2**attempt))
+    assert last_error is not None
+    raise last_error
+
+
 def _generate_openai_compatible(
     *,
     provider: str,
@@ -171,20 +226,91 @@ def _generate_openai_compatible(
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
 
-    response = requests.post(
-        url,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        json=payload,
-        timeout=120,
+    response = _post_with_retries(
+        label=provider,
+        do_post=lambda: requests.post(
+            url,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=120,
+        ),
     )
-    if response.status_code >= 400:
-        raise RuntimeError(f"{provider} API error {response.status_code}: {response.text[:400]}")
     data = response.json()
     text = data["choices"][0]["message"]["content"]
     return {"response": text or ""}
+
+
+def _gemini_generation_config(
+    *,
+    model: str,
+    temperature: float,
+    top_p: float,
+    json_mode: bool,
+) -> dict[str, Any]:
+    generation_config: dict[str, Any] = {
+        "temperature": temperature,
+        "topP": top_p,
+    }
+    if json_mode:
+        generation_config["responseMimeType"] = "application/json"
+
+    # Gemini 3.8+ expects a thinking level (LOW|MEDIUM|HIGH). Default LOW for
+    # faster / cheaper routing + RAG answers; override with GEMINI_THINKING_LEVEL.
+    if model.startswith("gemini-3.8") or model.startswith("gemini-3.7"):
+        level = (os.getenv("GEMINI_THINKING_LEVEL") or "LOW").strip().upper()
+        if level not in {"LOW", "MEDIUM", "HIGH"}:
+            level = "LOW"
+        generation_config["thinkingConfig"] = {"thinkingLevel": level}
+    return generation_config
+
+
+def _generate_gemini_once(
+    *,
+    api_key: str,
+    model: str,
+    system: str,
+    prompt: str,
+    temperature: float,
+    top_p: float,
+    json_mode: bool,
+) -> dict[str, str]:
+    url = (
+        f"https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{model}:generateContent"
+    )
+    body: dict[str, Any] = {
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "generationConfig": _gemini_generation_config(
+            model=model,
+            temperature=temperature,
+            top_p=top_p,
+            json_mode=json_mode,
+        ),
+    }
+    if system:
+        body["systemInstruction"] = {"parts": [{"text": system}]}
+
+    response = _post_with_retries(
+        label="gemini",
+        do_post=lambda: requests.post(
+            url,
+            params={"key": api_key},
+            headers={"Content-Type": "application/json"},
+            json=body,
+            timeout=120,
+        ),
+    )
+    data = response.json()
+    parts = (
+        data.get("candidates", [{}])[0]
+        .get("content", {})
+        .get("parts", [])
+    )
+    text = "".join(part.get("text", "") for part in parts)
+    return {"response": text}
 
 
 def _generate_gemini(
@@ -200,49 +326,28 @@ def _generate_gemini(
     if not api_key:
         raise RuntimeError("gemini selected but GEMINI_API_KEY (or LLM_API_KEY) is not set.")
 
-    url = (
-        f"https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{model}:generateContent"
-    )
-    generation_config: dict[str, Any] = {
-        "temperature": temperature,
-        "topP": top_p,
-    }
-    if json_mode:
-        generation_config["responseMimeType"] = "application/json"
-
-    # Gemini 3.8+ expects a thinking level (LOW|MEDIUM|HIGH). Default LOW for
-    # faster / cheaper routing + RAG answers; override with GEMINI_THINKING_LEVEL.
-    if model.startswith("gemini-3.8") or model.startswith("gemini-3.7"):
-        level = (os.getenv("GEMINI_THINKING_LEVEL") or "LOW").strip().upper()
-        if level not in {"LOW", "MEDIUM", "HIGH"}:
-            level = "LOW"
-        generation_config["thinkingConfig"] = {"thinkingLevel": level}
-
-    body: dict[str, Any] = {
-        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-        "generationConfig": generation_config,
-    }
-    if system:
-        body["systemInstruction"] = {"parts": [{"text": system}]}
-
-    response = requests.post(
-        url,
-        params={"key": api_key},
-        headers={"Content-Type": "application/json"},
-        json=body,
-        timeout=120,
-    )
-    if response.status_code >= 400:
-        raise RuntimeError(f"gemini API error {response.status_code}: {response.text[:400]}")
-    data = response.json()
-    parts = (
-        data.get("candidates", [{}])[0]
-        .get("content", {})
-        .get("parts", [])
-    )
-    text = "".join(part.get("text", "") for part in parts)
-    return {"response": text}
+    last_error: Exception | None = None
+    for candidate in _gemini_model_chain(model):
+        try:
+            return _generate_gemini_once(
+                api_key=api_key,
+                model=candidate,
+                system=system,
+                prompt=prompt,
+                temperature=temperature,
+                top_p=top_p,
+                json_mode=json_mode,
+            )
+        except RuntimeError as exc:
+            last_error = exc
+            msg = str(exc)
+            # Only fall through to the next model on transient overload / rate limits.
+            if not any(f"API error {code}" in msg for code in _RETRYABLE_HTTP):
+                raise
+            continue
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("gemini request failed with no models attempted")
 
 
 def describe_config() -> dict[str, str]:
