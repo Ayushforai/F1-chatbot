@@ -10,7 +10,7 @@ import os
 import re
 from datetime import datetime
 
-import ollama
+from utils.llm import generate as llm_generate, get_model_name
 from utils.driver_numbers import enrich_telemetry_params
 from utils.race_schedule import RACE_NOT_HELD_RESULTS_MESSAGE, race_results_unavailable_reason
 from utils.router import (
@@ -78,7 +78,7 @@ from utils.venues import (
     uses_csv_country_race_listing,
 )
 
-MODEL_NAME = 'qwen2.5:7b-instruct-q8_0'
+MODEL_NAME = get_model_name()
 
 DEFAULT_YEAR = 2026
 CONVERSATION_MEMORY_TURNS = 5
@@ -1441,13 +1441,12 @@ def generate_f1_response(
     system_prompt += f"\n{history_block}CONTEXT DATA PACKET:\n{context_text}"
 
     try:
-        response = ollama.generate(
-            model=MODEL_NAME,
+        response = llm_generate(
             system=system_prompt,
             prompt=user_query,
-            options={'temperature': 0.1, 'top_p': 0.9}
+            options={"temperature": 0.1, "top_p": 0.9},
         )
-        return response['response']
+        return response["response"]
     except Exception as e:
         return f"Telemetry stream interrupted. Error: {e}"
 
@@ -2632,7 +2631,7 @@ def process_query(conversation_history: list[dict], user_query: str) -> dict | N
 
 def main():
     initialize_pipeline()
-    print(f"\nPit Wall Active [Model: {MODEL_NAME}]. Type 'exit' to close telemetry link.\n")
+    print(f"\nRacecoe active [Model: {MODEL_NAME}]. Type 'exit' to close telemetry link.\n")
 
     conversation_history = []
 

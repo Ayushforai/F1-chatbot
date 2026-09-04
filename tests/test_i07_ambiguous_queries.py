@@ -42,11 +42,11 @@ class AmbiguousQueryTests(unittest.TestCase):
         self.assertIn("Race results", response)
 
     def test_route_query_returns_ambiguous_on_invalid_llm_output(self):
-        with patch("utils.router.ollama.generate", return_value={"response": "unclear category guess"}):
+        with patch("utils.router.llm_generate", return_value={"response": "unclear category guess"}):
             self.assertEqual(route_query("something odd"), "ambiguous")
 
     def test_route_query_returns_ambiguous_on_router_error(self):
-        with patch("utils.router.ollama.generate", side_effect=RuntimeError("llm down")):
+        with patch("utils.router.llm_generate", side_effect=RuntimeError("llm down")):
             self.assertEqual(route_query("anything"), "ambiguous")
 
 

@@ -51,7 +51,7 @@ class TestDriverNumbers(unittest.TestCase):
         self.assertEqual(enriched["driver_name"], "Verstappen")
 
     def test_extractor_failure_resolves_driver_from_query(self):
-        with patch("utils.router.ollama.generate", side_effect=RuntimeError("llm down")):
+        with patch("utils.router.llm_generate", side_effect=RuntimeError("llm down")):
             params = extract_telemetry_params(
                 "what is the current speed of Verstappen?",
             )

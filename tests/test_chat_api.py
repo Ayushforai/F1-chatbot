@@ -82,8 +82,10 @@ class TestFastAPIChatWrapper(unittest.TestCase):
     def test_health(self):
         response = self.client.get("/health")
         self.assertEqual(response.status_code, 200)
-        self.assertTrue(response.json()["ready"])
-        self.assertEqual(response.json()["model"], server.MODEL_NAME)
+        payload = response.json()
+        self.assertTrue(payload["ready"])
+        self.assertEqual(payload["model"], server.MODEL_NAME)
+        self.assertIn("provider", payload)
 
 
 if __name__ == "__main__":

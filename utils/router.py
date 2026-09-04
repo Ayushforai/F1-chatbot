@@ -1,11 +1,9 @@
 import json
 import re
-import ollama
 
 from utils.driver_numbers import enrich_telemetry_params
+from utils.llm import generate as llm_generate
 from utils.venues import resolve_venue
-
-MODEL_NAME = "qwen2.5:7b-instruct-q8_0"
 
 VALID_CATEGORIES = [
     "general",
@@ -240,8 +238,7 @@ def route_query(user_query: str, history: list[dict] = None) -> str:
     prompt_with_context = history_context + f"Current query: {user_query}"
 
     try:
-        response = ollama.generate(
-            model=MODEL_NAME,
+        response = llm_generate(
             system=system_prompt,
             prompt=prompt_with_context,
             options={"temperature": 0.0, "top_p": 0.1},
@@ -296,8 +293,7 @@ def extract_telemetry_params(user_query: str, history: list[dict] = None) -> dic
     prompt_with_context = history_context + f"Current query: {user_query}"
 
     try:
-        response = ollama.generate(
-            model=MODEL_NAME,
+        response = llm_generate(
             system=system_prompt,
             prompt=prompt_with_context,
             options={"temperature": 0.0},

@@ -1,4 +1,4 @@
-"""FastAPI wrapper around the existing F1 chat pipeline, plus the Pit Wall UI."""
+"""FastAPI wrapper around the Racecoe chat pipeline, plus the web UI."""
 
 from __future__ import annotations
 
@@ -9,12 +9,16 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
-from app import MODEL_NAME, initialize_pipeline, process_query
+load_dotenv(Path(__file__).resolve().parent / ".env")
+
+from app import initialize_pipeline, process_query
+from utils.llm import active_model_label, describe_config, get_model_name
 from utils.season_calendar import get_season_calendar, list_calendar_years
 
 ROOT = Path(__file__).resolve().parent
@@ -24,6 +28,14 @@ _ready = False
 _ready_error: str | None = None
 _sessions: dict[str, list[dict]] = {}
 _lock = threading.Lock()
+
+
+def _cors_origins() -> list[str]:
+    raw = (os.getenv("CORS_ORIGINS") or "").strip()
+    if not raw or raw == "*":
+        # Local/dev default. Set CORS_ORIGINS to a comma-separated allowlist in production.
+        return ["*"]
+    return [origin.strip() for origin in raw.split(",") if origin.strip()]
 
 
 class ChatRequest(BaseModel):
@@ -50,7 +62,7 @@ def _boot() -> None:
     try:
         initialize_pipeline()
         _ready = True
-        print(" [API] Pit wall ready for radio.")
+        print(f" [API] Racecoe ready [{active_model_label()}].")
     except Exception as exc:
         _ready_error = str(exc)
         print(f" [API] Startup failed: {exc}")
@@ -64,13 +76,13 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(
-    title="F1 Pit Wall",
+    title="Racecoe",
     lifespan=lifespan,
 )
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins(),
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -126,10 +138,14 @@ async def api_chat(payload: ChatRequest):
 @app.get("/health")
 @app.get("/api/health")
 def health():
+    cfg = describe_config()
     return {
         "ready": _ready,
         "error": _ready_error,
-        "model": MODEL_NAME,
+        "model": get_model_name(),
+        "provider": cfg["provider"],
+        "model_label": cfg["label"],
+        "has_api_key": cfg["has_api_key"],
     }
 
 
@@ -185,7 +201,13 @@ def spa(path: str):
     return _spa_response(path)
 
 
+# TestClient and health checks import MODEL_NAME from server
+MODEL_NAME = get_model_name()
+
+
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="127.0.0.1", port=5001, log_level="info")
+    port = int(os.getenv("PORT", "5001"))
+    host = os.getenv("HOST", "127.0.0.1")
+    uvicorn.run(app, host=host, port=port, log_level="info")

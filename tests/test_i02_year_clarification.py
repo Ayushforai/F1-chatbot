@@ -116,7 +116,7 @@ class TestI02YearClarification(unittest.TestCase):
         fastest.assert_called_once_with(2023, "Monaco", None, location=None)
 
     def test_extractor_failure_no_longer_forces_year_2026(self):
-        with patch("utils.router.ollama.generate", side_effect=RuntimeError("llm down")):
+        with patch("utils.router.llm_generate", side_effect=RuntimeError("llm down")):
             from utils.router import extract_telemetry_params
 
             params = extract_telemetry_params("fastest lap monaco")

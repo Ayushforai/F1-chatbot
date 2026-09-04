@@ -86,7 +86,7 @@ class TestI01DriverClarification(unittest.TestCase):
         fastest.assert_called_once_with(2024, "Monaco", None, location=None)
 
     def test_extractor_failure_no_longer_forces_driver_44(self):
-        with patch("utils.router.ollama.generate", side_effect=RuntimeError("llm down")):
+        with patch("utils.router.llm_generate", side_effect=RuntimeError("llm down")):
             params = extract_telemetry_params("what is the current speed?")
 
         self.assertIsNone(params["driver_number"])

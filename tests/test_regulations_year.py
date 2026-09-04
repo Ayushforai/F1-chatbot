@@ -31,7 +31,7 @@ class RegulationsYearDefaultTests(unittest.TestCase):
         self.assertEqual(app._explicit_year("cost cap in 2024"), 2024)
 
     def test_generate_f1_response_includes_regulation_year_rule(self):
-        with patch("app.ollama.generate", return_value={"response": "answer"}) as generate:
+        with patch("app.llm_generate", return_value={"response": "answer"}) as generate:
             app.generate_f1_response("cost cap", "context", regulation_year=2026)
         self.assertIn("2026 season regulations", generate.call_args.kwargs["system"])
         self.assertIn("FORMAT RULES", generate.call_args.kwargs["system"])
