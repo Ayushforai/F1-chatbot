@@ -39,7 +39,7 @@ Living backlog. Add new items as we spot them during testing. Check them off as 
 
 ### Product / pipeline gaps
 
-- [ ] **P01** (Medium) — `streamlit` in `requirements.txt` but app is CLI-only (`app.py`)
+- [x] **P01** (Medium) — `streamlit` in `requirements.txt` but app is CLI-only (`app.py`)
 - [x] **P02** (Medium) — No source citation in answers (race doc / PDF chunk / API field)
 - [x] **P03** (Low) — No guard when OpenF1 returns empty for future year / wrong country
 - [x] **P04** (Low) — Emilia Romagna / sprint weekends / multi-race countries poorly mapped
@@ -82,6 +82,7 @@ Living backlog. Add new items as we spot them during testing. Check them off as 
 - [x] **B05** — 2026-08-23 — Regulation PDFs indexed by Section A–E / legacy filenames from `data/` and `data/archive/`, with article-aware chunking, `articles.json` exact lookup, and hybrid RAG search.
 - [x] **I10** — 2026-08-31 — `data/driver_numbers.json` maps OpenF1 grid names/acronyms/`#NN` to car numbers per season; `F1DriversDataset.csv` resolves 868 canonical driver names from query text; `utils/driver_numbers.py` enriches extractor output when the LLM fails or omits `driver_name`.
 - [x] **B04** — 2026-09-02 — Missing Ergast CSVs set all tables to `None`, `csv_available()` guards public lookups, and `app.py` returns a setup message instead of `NameError` for CSV-backed historical queries.
+- [x] **P01** — 2026-09-03 — Removed unused `streamlit` from `requirements.txt`; app runs via CLI (`app.py`) and FastAPI (`server.py`) with the React frontend.
 
 ---
 

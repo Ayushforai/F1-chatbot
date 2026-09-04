@@ -585,7 +585,10 @@ def get_openf1_session_classification(
         driver = drivers.get(row.get("driver_number"), {})
         gap = row.get("gap_to_leader")
         duration = row.get("duration")
-        time_value = format_lap_time(gap if gap is not None else duration)
+        if row.get("position") == 1:
+            time_value = format_lap_time(duration) if duration is not None else "N/A"
+        else:
+            time_value = format_lap_time(gap if gap is not None else duration)
         finishers.append(
             {
                 "Position": str(row.get("position") or "?"),

@@ -37,9 +37,41 @@ class TestHistoricalCsvAvailability(unittest.TestCase):
             self.assertIn("setup_historical_data", result.lower())
 
     def test_race_results_response_shows_setup_message(self):
-        with patch("app.csv_available", return_value=False):
+        with patch("app.csv_available", return_value=False), patch(
+            "app.get_openf1_session_classification",
+            return_value="No Race results found for this session.",
+        ):
             answer = app._format_race_results_response("results of monaco gp 2021?", [], year=2021)
         self.assertEqual(answer, CSV_UNAVAILABLE_MESSAGE)
+
+    def test_race_results_use_openf1_when_csv_unavailable(self):
+        openf1_packet = {
+            "Year": 2026,
+            "Grand Prix": "Chinese Grand Prix",
+            "Session": "Race",
+            "Classification": [
+                {
+                    "Position": "1",
+                    "Driver": "Kimi ANTONELLI",
+                    "Team": "Mercedes",
+                    "Gap / Race Time": "1:33:15.607",
+                    "Status": "Finished",
+                    "Fastest Lap": "N/A",
+                    "Fastest Lap Number": "N/A",
+                    "Points": 0,
+                }
+            ],
+        }
+        with patch("app.csv_available", return_value=False), patch(
+            "app.get_openf1_session_classification",
+            return_value=openf1_packet,
+        ):
+            answer = app._format_race_results_response(
+                "Results of Chinese GP 2026",
+                [],
+                2026,
+            )
+        self.assertIn("ANTONELLI", answer)
 
     def test_driver_team_handler_shows_setup_message(self):
         history: list[dict] = []
