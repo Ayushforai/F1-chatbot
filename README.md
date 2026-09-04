@@ -17,6 +17,8 @@ One codebase supports both via `utils/llm.py` (`LLM_PROVIDER` + optional `LLM_MO
 
 `gemini-3.8-flash` is the newest Flash workhorse and is available on the Gemini API free tier (rate-limited). Racecoe defaults to it for deploy. Older IDs like `gemini-3.6-flash` still work via `LLM_MODEL`.
 
+**Gemini overload (503):** On the free Flash API, Google may return `503 UNAVAILABLE` with *“This model is currently experiencing high demand”*. That is an **LLM provider** failure — CSV/RAG context can be fine while chat still fails. Racecoe retries with backoff and falls back across models (`gemini-3.6-flash`, then `gemini-2.0-flash`) via `utils/llm.py` / `GEMINI_FALLBACK_MODELS`.
+
 ### Google One Plus vs Gemini API
 
 The models you see in the **Gemini app** with Google One Plus are **consumer product names**. Racecoe talks to the **Gemini Developer API**, which uses model IDs like:
@@ -197,6 +199,85 @@ Example queries:
 | `Who finished second?` | Follow-up from conversation memory |
 | `and in 2023?` (after a driver-team answer) | Follow-up with new season |
 
+## Evaluation
+
+Racecoe is evaluated with an **issue-driven quality backlog**, **automated regression tests**, and **deploy smoke checks** (not a single end-to-end LLM accuracy score). Metrics below reflect what has been tracked since the project started.
+
+### 1. Issue backlog quality (`ISSUES.md`)
+
+Incorrect answers, bugs, and product gaps are tracked with stable IDs and severity.
+
+| Bucket | Tracked | Closed | Still open |
+|--------|---------|--------|------------|
+| Incorrect / misleading answers (**I01–I10**) | 10 | 10 | 0 |
+| Bugs (**B01–B06**) | 6 | 5 | **1** (`B02` — empty RAG chunks can still answer) |
+| Product / pipeline gaps (**P01–P04**) | 4 | 4 | 0 |
+| **Total** | **20** | **19** | **1** |
+
+**Closure rate:** 19/20 = **95%** of logged correctness/product issues fixed.
+
+Representative regressions that now have dedicated tests (named after issue IDs):
+
+| ID | Failure mode | Evaluation signal |
+|----|--------------|-------------------|
+| I01 | Silent default to Hamilton (#44) | Driver clarification tests |
+| I02 | Silent year=2026 | Year clarification tests |
+| I03 | Fake “live” Silverstone 2024 archive | Live-session gate tests |
+| I04 | Top-10-only classifications / missing DNFs | Full classification + CSV preference tests |
+| I05 | Weak driver–team career answers | CSV `get_driver_teams` tests |
+| I06 | Follow-ups lost prior answer | Conversation memory tests |
+| I07 | Ambiguous → wrong KB | Ambiguous-query / router tests |
+| I09 | Raw lap seconds instead of `M:SS.mmm` | Lap-time format tests |
+| B01 | Missing driver still queried #44 | Covered with I01 suite |
+| P02 | No source citation | Citation footer tests |
+
+### 2. Automated regression suite
+
+| Suite | Scope | Count (current) | How to run |
+|-------|--------|-----------------|------------|
+| Python unit tests | Router, CSV/RAG paths, venues, API wrapper, Gemini client, regulations, follow-ups | **226** cases in `tests/` | `PYTHONPATH=. python -m unittest discover -s tests -v` |
+| Frontend formatting | Answer markdown / race list rendering | **4** cases | `cd frontend && node --test src/formatAnswer.test.js` |
+| In-process deploy smoke | Monaco 2021 → “who was third?” stickiness + `/api/health` | **2** assertions | `PYTHONPATH=. python scripts/smoke_deploy.py` |
+| HTTP / production smoke | Same follow-up against a running server | Live gate | `python scripts/smoke_deploy.py --http --base-url URL` |
+
+**Pass criterion for merge/deploy:** unit suite green; smoke asserts Norris stays P3 for Monaco 2021 and does not re-prompt session choice.
+
+### 3. Deploy / public-host metrics
+
+Checked during Docker + Render bring-up:
+
+| Metric | Target / observed |
+|--------|-------------------|
+| Historical CSVs in image | **15/15** files under `/app/data/historical_csvs` |
+| FAISS indexes in image | **5/5** categories (`historical`, `sporting`, `technical`, `financial`, `operational`) |
+| `/api/health` | `ready: true`, `provider: gemini`, `model: gemini-3.8-flash`, `has_api_key: yes` |
+| Live smoke (Render) | Monaco results + follow-up **passed** on `https://racecoe.onrender.com` |
+| Port bind on Render | Must listen on injected `PORT` (observed `10000`) before health checks succeed |
+
+#### Public reliability incidents (and fixes)
+
+These are separate failure modes that both blocked public historical Q&A until fixed:
+
+| Incident | What users saw | Root cause | Fix |
+|----------|----------------|------------|-----|
+| **Gemini overload** | Chat failed on follow-ups (raw API error / “stream interrupted”) even when race CSV context was present | Gemini API **`503 UNAVAILABLE`** — *“This model is currently experiencing high demand”* on `gemini-3.8-flash` free tier | Retries + exponential backoff; fallback chain `gemini-3.6-flash` → `gemini-2.0-flash`; clearer user-facing overload message |
+| **Render free-tier OOM** | Site never became healthy / deploy failed (“no open ports”, then crash) | **512MB RAM** exceeded while eagerly loading CUDA torch + embedding weights before uvicorn bound | CPU-only torch image; lazy import of sentence-transformers; `F1_SKIP_WARMUP=1` so the API becomes ready without preloading embeddings (RAG loads on first use) |
+
+**Takeaway:** overload = temporary **LLM API** unavailability; OOM = **host memory** killing the process. Both are documented in Evaluation because both made public historical Q&A unavailable until mitigated.
+
+### 4. Behavioural correctness checks (non-LLM-score)
+
+These are binary / structural checks used instead of BLEU/RAGAS:
+
+- **No silent defaults** — missing driver/year must clarify (I01/I02).
+- **Full grid integrity** — classifications include all finishers + DNFs, not top 10 (I04).
+- **Follow-up stickiness** — position questions reuse race context; session-choice offer does not trap the dialog.
+- **Live vs archive honesty** — off-weekend telemetry returns unavailable, never a hardcoded 2024 session (I03).
+- **Citation present** — answers append a source footer (P02).
+- **Multi-GP safety** — Italy/USA/etc. require venue choice before answering.
+
+> Note: Racecoe does **not** yet publish a held-out LLM accuracy % (e.g. RAGAS faithfulness). Quality is measured by the issue closure rate, the 226 automated regressions, and deploy smoke gates above.
+
 ## Testing
 
 ```bash
@@ -205,6 +286,13 @@ PYTHONPATH=. python -m unittest discover -s tests -v
 
 # Frontend answer-formatting unit tests
 cd frontend && node --test src/formatAnswer.test.js
+
+# Deploy smoke (in-process)
+PYTHONPATH=. python scripts/smoke_deploy.py
+
+# Deploy smoke against local Docker or Render
+python scripts/smoke_deploy.py --http --base-url http://127.0.0.1:8000
+python scripts/smoke_deploy.py --http --base-url https://racecoe.onrender.com
 ```
 
 ## Project Structure
@@ -296,9 +384,9 @@ python app.py
 | Setup | Recommendation |
 |-------|----------------|
 | **Local LLM** | Use **Ollama** (`LLM_PROVIDER=ollama`, model `qwen2.5:7b-instruct-q8_0`). |
-| **Production LLM** | Use **Gemini 3.8 Flash** (`LLM_PROVIDER=gemini`, `LLM_MODEL=gemini-3.8-flash`). Free tier is rate-limited. |
-| **Packaging** | Prefer **Docker** (`Dockerfile`): builds the React app, copies CSVs + `vector_store/`, runs `uvicorn server:app --host 0.0.0.0 --port $PORT`. |
-| **Long-running API server** | Keep one process alive. Embedding weights load once at boot and serve all RAG queries until shutdown. |
+| **Production LLM** | Use **Gemini 3.8 Flash** (`LLM_PROVIDER=gemini`, `LLM_MODEL=gemini-3.8-flash`). Free tier is rate-limited; **503 high-demand** responses are retried and fall back to other Flash models (see Evaluation). |
+| **Packaging** | Prefer **Docker** (`Dockerfile`): builds the React app, copies CSVs + `vector_store/`, runs `uvicorn server:app --host 0.0.0.0 --port $PORT`. On Render free (512MB), default `F1_SKIP_WARMUP=1` so boot does not OOM on embeddings. |
+| **Long-running API server** | Keep one process alive. With warmup enabled, embedding weights load once at boot; with skip-warmup, they load on first RAG use. |
 | **Hugging Face cache** | Mount or bake `~/.cache/huggingface`, or set `HF_HOME`, so embedding weights persist across container restarts. |
 | **Serverless / scale-to-zero** | Every cold start reloads the embedding model unless you use provisioned concurrency or a managed embedding API. |
 | **Multiple workers** | Each worker holds its own copy of the embedding model (~400MB). Prefer 1–2 workers with async, or a shared external embedding service. |
