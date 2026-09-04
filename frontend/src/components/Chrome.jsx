@@ -211,7 +211,7 @@ export function Hero({ tab, onTab, year }) {
   return (
     <section className="hero page-pad">
       <div className="speed-lines" />
-      <h1>{year || 2026} Season</h1>
+      <h1>Racecoe</h1>
       <div className="tabs">
         <button className={tab === "chat" ? "active" : ""} onClick={() => onTab("chat")}>
           Chat
