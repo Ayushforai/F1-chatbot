@@ -19,7 +19,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     LLM_PROVIDER=gemini \
     LLM_MODEL=gemini-3.8-flash \
     GEMINI_THINKING_LEVEL=LOW \
-    F1_SKIP_WARMUP=0 \
+    # Default skip for small cloud hosts (512MB). Override to 0 for full RAG warmup.
+    F1_SKIP_WARMUP=1 \
     OMP_NUM_THREADS=1 \
     MKL_NUM_THREADS=1 \
     TOKENIZERS_PARALLELISM=false
