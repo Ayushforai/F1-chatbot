@@ -11,19 +11,21 @@ botenv/
 .idea/
 *.swp
 
-# Generated FAISS indexes (rebuild with pdf_processor.py / historical_processor.py).
-# Keep folder placeholders in git so Docker COPY always has a path; binaries stay local.
+# FAISS indexes — track built indexes so Docker/Render deploys include RAG.
+# Rebuild locally with pdf_processor.py / historical_processor.py when regs change.
+# Keep empty category dirs via .gitkeep; ignore stray files under vector_store.
 vector_store/**
 !vector_store/.gitkeep
 !vector_store/**/
 !vector_store/**/.gitkeep
+!vector_store/**/index.faiss
+!vector_store/**/index.pkl
 
 # Large optional datasets (download locally via setup_historical_data.py)
 data/archive/
 
 # Model caches
 .cache/
-*.faiss
 
 # Frontend
 frontend/node_modules/

@@ -5,6 +5,9 @@
 # 1. Create GEMINI_API_KEY at https://aistudio.google.com/apikey
 # 2. Create HF_TOKEN at https://huggingface.co/settings/tokens
 # 3. In Render dashboard, set those as secret env vars (or fill below as sync:false)
+#
+# Image includes data/historical_csvs + vector_store FAISS indexes from the repo.
+# Free tier sleeps when idle; first request after wake can take minutes (embedding warmup).
 
 services:
   - type: web
@@ -21,6 +24,7 @@ services:
         value: LOW
       - key: HOST
         value: 0.0.0.0
+      # Render injects PORT; keep HOST=0.0.0.0 so uvicorn binds correctly.
       - key: CORS_ORIGINS
         sync: false
       - key: GEMINI_API_KEY
