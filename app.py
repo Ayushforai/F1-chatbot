@@ -30,7 +30,6 @@ from utils.f1_api import (
     get_max_speed_trap_season,
     get_openf1_session_classification,
 )
-from utils.vector_store import search_regulations, search_with_metadata, warmup_rag
 from utils.citations import (
     SourceCitation,
     append_citation,
@@ -39,6 +38,7 @@ from utils.citations import (
     conversation_memory,
     csv_country_races,
     csv_driver_teams,
+    csv_driver_standing,
     csv_lap_times,
     csv_race_results,
     multi_gp_venue_map,
@@ -52,12 +52,14 @@ from utils.historical_db import (
     csv_available,
     format_country_grand_prix_listing_answer,
     format_driver_teams,
+    format_driver_standing,
     format_lap_time_delta,
     format_qualifying_grid,
     format_race_classification,
     format_session_classification,
     format_top_speed_lookup,
     get_driver_teams,
+    get_driver_standing,
     get_historical_driver_info,
     get_lap_time_delta,
     get_qualifying_results,
@@ -175,6 +177,8 @@ def _regulations_rag_context(
     year: int,
 ) -> tuple[str, SourceCitation]:
     print(f" [RAG] Searching {category} regulations for {year}...")
+    from utils.vector_store import search_regulations
+
     chunks, metadata = search_regulations(category, user_query, year=year)
     source = citation_from_regulation_metadata(category, year, metadata)
     context = f"Season: {year}\n\n" + "\n\n".join(chunks)
@@ -948,17 +952,35 @@ def _prior_answer_likely_sufficient(user_query: str, prior_answer: str) -> bool:
     return len(prior_answer) > 400
 
 
-def _prior_turn_driver_team_context(prior: dict) -> dict | None:
-    """Recover driver and base query from a prior driver-team lookup turn."""
+def resolve_driver_standing_year(user_query: str, history: list[dict]) -> dict:
+    """Resolve season for driver championship standing lookups."""
+    return resolve_race_results_year(user_query, history)
+
+
+def _prior_turn_driver_context(prior: dict) -> dict | None:
+    """Recover driver and base query from a prior driver CSV lookup turn."""
     query = prior.get("driver_lookup_query") or prior.get("pending_query") or prior.get("query")
     if not query:
         return None
-    if not prior.get("driver_lookup_query") and not _is_driver_team_query(query):
+    if prior.get("driver_lookup_query"):
+        driver_ref = (
+            _driver_ref_from_standing_query(query)
+            or _driver_ref_from_team_query(query)
+        )
+    elif _is_driver_standing_query(query):
+        driver_ref = _driver_ref_from_standing_query(query)
+    elif _is_driver_team_query(query):
+        driver_ref = _driver_ref_from_team_query(query)
+    else:
         return None
-    driver_ref = _driver_ref_from_team_query(query)
     if not driver_ref:
         return None
     return {"query": query, "driver_ref": driver_ref}
+
+
+def _prior_turn_driver_team_context(prior: dict) -> dict | None:
+    """Recover driver and base query from a prior driver-team lookup turn."""
+    return _prior_turn_driver_context(prior)
 
 
 def _prior_turn_race_context(prior: dict) -> dict | None:
@@ -1024,14 +1046,31 @@ def _build_follow_up_lookup_context(
         return None
 
     prior = _follow_up_anchor_turn(history)
-    driver_ctx = _prior_turn_driver_team_context(prior)
+    driver_ctx = _prior_turn_driver_context(prior)
     if driver_ctx:
         year = _explicit_year(user_query)
         if year is None:
-            year_result = resolve_driver_team_year(user_query, history)
+            year_result = resolve_driver_standing_year(user_query, history)
             if year_result["kind"] != "ok":
                 return None
             year = year_result["year"]
+        if _is_driver_standing_query(user_query):
+            print(
+                f" [CSV] Driver-standing follow-up lookup for "
+                f"{driver_ctx['driver_ref']} in {year}..."
+            )
+            fresh = _lookup_driver_standing(
+                driver_ctx["query"],
+                year,
+                history=history,
+                driver_ref=driver_ctx["driver_ref"],
+            )
+            return (
+                "Use the FRESH LOOKUP DATA below to answer the follow-up.\n\n"
+                f"FRESH LOOKUP DATA:\n{fresh}\n\n"
+                f"{_follow_up_context(history, prior=prior)}",
+                csv_driver_standing(year=year),
+            )
         print(
             f" [CSV] Driver-team follow-up lookup for {driver_ctx['driver_ref']} in {year}..."
         )
@@ -1102,13 +1141,47 @@ def _build_follow_up_lookup_context(
     return None
 
 
+def _try_driver_standing_follow_up(user_query: str, history: list[dict]) -> dict | None:
+    """Answer a driver-standings follow-up directly from CSV."""
+    if not _is_driver_standing_query(user_query):
+        return None
+    if not _is_answer_follow_up(user_query, history):
+        return None
+
+    prior = history[-1]
+    driver_ctx = _prior_turn_driver_context(prior)
+    if not driver_ctx:
+        return None
+
+    year = _explicit_year(user_query) or prior.get("year")
+    if year is None:
+        year_result = resolve_driver_standing_year(user_query, history)
+        if year_result["kind"] != "ok":
+            return None
+        year = year_result["year"]
+
+    answer = _lookup_driver_standing(
+        driver_ctx["query"],
+        year,
+        history=history,
+        driver_ref=driver_ctx["driver_ref"],
+    )
+    return {
+        "category": "historical",
+        "answer": answer,
+        "year": year,
+        "driver_lookup_query": driver_ctx["query"],
+        "source": csv_driver_standing(year=year),
+    }
+
+
 def _try_driver_team_follow_up(user_query: str, history: list[dict]) -> dict | None:
     """Answer a year-only follow-up to a driver-team query directly from CSV."""
     if not _is_answer_follow_up(user_query, history):
         return None
 
     prior = history[-1]
-    driver_ctx = _prior_turn_driver_team_context(prior)
+    driver_ctx = _prior_turn_driver_context(prior)
     if not driver_ctx:
         return None
 
@@ -1222,6 +1295,11 @@ def _try_answer_follow_up(user_query: str, history: list[dict]) -> dict | None:
     if not _is_answer_follow_up(user_query, history):
         return None
 
+    driver_standing_follow_up = _try_driver_standing_follow_up(user_query, history)
+    if driver_standing_follow_up:
+        print(" [CSV] Driver-standing follow-up answered from CSV lookup")
+        return driver_standing_follow_up
+
     driver_follow_up = _try_driver_team_follow_up(user_query, history)
     if driver_follow_up:
         print(" [CSV] Driver-team follow-up answered from CSV lookup")
@@ -1263,7 +1341,7 @@ def _try_answer_follow_up(user_query: str, history: list[dict]) -> dict | None:
     lookup_context, source = lookup
     answer = generate_f1_response(user_query, lookup_context, history=history)
     extra = {}
-    driver_ctx = _prior_turn_driver_team_context(prior)
+    driver_ctx = _prior_turn_driver_context(prior)
     if driver_ctx:
         year = _explicit_year(user_query) or prior.get("year")
         if year is not None:
@@ -1314,6 +1392,9 @@ def _is_answer_follow_up(user_query: str, history: list[dict]) -> bool:
         "which driver",
         "who got",
         "fastest lap",
+        "standings",
+        "championship",
+        "points",
     )
     if any(hint in q for hint in follow_hints):
         return True
@@ -1523,6 +1604,77 @@ def _wants_full_classification_or_pace(user_query: str) -> bool:
         "gp ",
     )
     return any(hint in q for hint in hints)
+
+
+def _is_driver_standing_query(user_query: str) -> bool:
+    """True when the user asks for a driver's championship position or points."""
+    if _wants_full_classification_or_pace(user_query):
+        return False
+    q = user_query.lower()
+    patterns = (
+        "driver standings",
+        "drivers standings",
+        "drivers' standings",
+        "driver standing",
+        "championship position",
+        "championship standing",
+        "championship finish",
+        "world championship",
+        "drivers championship",
+        "driver's championship",
+        "in the standings",
+        "in that year",
+        "finish in the standings",
+        "finished in the standings",
+        "where did he finish in the",
+        "where did she finish in the",
+        "how many points did",
+        "points in the championship",
+        "points in that season",
+        "how many wins did",
+        "wins in the championship",
+    )
+    return any(pattern in q for pattern in patterns)
+
+
+def _driver_ref_from_standing_query(user_query: str, history: list[dict] | None = None) -> str | None:
+    params = extract_telemetry_params(user_query, history=history or [])
+    if params.get("driver_name"):
+        return params["driver_name"]
+
+    patterns = [
+        r"where did\s+([A-Za-z\u00C0-\u024F\-']+(?:\s+[A-Za-z\u00C0-\u024F\-']+)?)\s+finish",
+        r"how many points did\s+([A-Za-z\u00C0-\u024F\-']+(?:\s+[A-Za-z\u00C0-\u024F\-']+)?)",
+        r"how many wins did\s+([A-Za-z\u00C0-\u024F\-']+(?:\s+[A-Za-z\u00C0-\u024F\-']+)?)",
+        r"([A-Za-z\u00C0-\u024F\-']+(?:\s+[A-Za-z\u00C0-\u024F\-']+)?)'s\s+(?:driver\s+)?standings",
+        r"([A-Za-z\u00C0-\u024F\-']+(?:\s+[A-Za-z\u00C0-\u024F\-']+)?)\s+(?:driver\s+)?standings",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, user_query, re.I)
+        if match:
+            return match.group(1).strip()
+    return _driver_ref_from_team_query(user_query, history=history)
+
+
+def _lookup_driver_standing(
+    user_query: str,
+    year: int,
+    history: list[dict] | None = None,
+    driver_ref: str | None = None,
+) -> str:
+    if driver_ref is None:
+        driver_ref = _driver_ref_from_standing_query(user_query, history=history or [])
+    if not driver_ref and history:
+        driver_ctx = _prior_turn_driver_context(history[-1])
+        if driver_ctx:
+            driver_ref = driver_ctx["driver_ref"]
+    if not driver_ref:
+        return MISSING_DRIVER_MESSAGE
+    print(f" [CSV] Looking up {year} championship standing for {driver_ref}...")
+    result = get_driver_standing(year, driver_ref)
+    if isinstance(result, str):
+        return result
+    return format_driver_standing(result)
 
 
 def _is_driver_team_query(user_query: str) -> bool:
@@ -1850,6 +2002,66 @@ def _handle_multi_gp_listing_query(conversation_history: list[dict], user_query:
     return _handle_country_race_listing_query(conversation_history, user_query)
 
 
+def _handle_driver_standing_query(conversation_history: list[dict], user_query: str) -> bool:
+    """Answer driver championship standing questions from CSV."""
+    if not _is_driver_standing_query(user_query):
+        return False
+
+    if not csv_available():
+        _respond_historical_csv_unavailable(conversation_history, user_query)
+        return True
+
+    year_result = resolve_driver_standing_year(user_query, conversation_history)
+    if year_result["kind"] == "clarify":
+        message = year_result["message"]
+        print(f"\nResponse:\n{message}\n")
+        print("-" * 50)
+        _save_conversation_turn(
+            conversation_history,
+            {
+                **_prompt_for_year(
+                    user_query,
+                    "historical",
+                    "driver_standing",
+                    pending_query=user_query,
+                ),
+                "answer": message,
+            },
+        )
+        return True
+
+    year = year_result["year"]
+    driver_ref = _driver_ref_from_standing_query(user_query, conversation_history)
+    if not driver_ref:
+        prior_ctx = _prior_turn_driver_context(conversation_history[-1]) if conversation_history else None
+        driver_ref = prior_ctx["driver_ref"] if prior_ctx else None
+    if not driver_ref:
+        _respond_and_remember(
+            conversation_history,
+            user_query,
+            "historical",
+            MISSING_DRIVER_MESSAGE,
+        )
+        return True
+
+    answer = _lookup_driver_standing(
+        user_query,
+        year,
+        history=conversation_history,
+        driver_ref=driver_ref,
+    )
+    _respond_and_remember(
+        conversation_history,
+        user_query,
+        "historical",
+        answer,
+        source=csv_driver_standing(year=year),
+        year=year,
+        driver_lookup_query=user_query,
+    )
+    return True
+
+
 def _handle_driver_team_query(conversation_history: list[dict], user_query: str) -> bool:
     """Answer driver-team career questions from CSV. Returns True if handled."""
     if not _is_driver_team_query(user_query):
@@ -1948,6 +2160,16 @@ def _csv_historical_record(
 
 
 def _historical_context(user_query: str, history: list[dict]) -> tuple[str, SourceCitation | None]:
+    if _is_driver_standing_query(user_query):
+        if not csv_available():
+            return CSV_UNAVAILABLE_MESSAGE, None
+        year_result = resolve_driver_standing_year(user_query, history)
+        if year_result["kind"] == "ok":
+            year = year_result["year"]
+            answer = _lookup_driver_standing(user_query, year, history=history)
+            print(" [CSV] Using driver-standing lookup...")
+            return answer, csv_driver_standing(year=year)
+
     if _is_driver_team_query(user_query):
         if not csv_available():
             return CSV_UNAVAILABLE_MESSAGE, None
@@ -1963,6 +2185,8 @@ def _historical_context(user_query: str, history: list[dict]) -> tuple[str, Sour
             return CSV_UNAVAILABLE_MESSAGE, None
         try:
             print(" [RAG] Searching historical vector store...")
+            from utils.vector_store import search_with_metadata
+
             chunks, metadata = search_with_metadata("historical", user_query, k=5)
             source = citation_from_historical_metadata(metadata)
             return "\n\n".join(chunks), source
@@ -1997,6 +2221,8 @@ def _historical_context(user_query: str, history: list[dict]) -> tuple[str, Sour
 
     try:
         print(" [RAG] Searching historical vector store...")
+        from utils.vector_store import search_with_metadata
+
         chunks, metadata = search_with_metadata("historical", user_query, k=5)
         source = citation_from_historical_metadata(metadata)
         return "\n\n".join(chunks), source
@@ -2262,6 +2488,8 @@ def initialize_pipeline() -> None:
             f"1 USD = {rates['usd_to_gbp']:.2f} GBP"
         )
     print(" [RAG] Loading embedding model into memory...")
+    from utils.vector_store import warmup_rag
+
     warmup_rag(categories=_rag_warmup_categories())
     print(" [RAG] Embedding model ready.")
 
@@ -2324,6 +2552,9 @@ def process_query(conversation_history: list[dict], user_query: str) -> dict | N
         return current_response(conversation_history)
 
     if not awaiting_year and not awaiting_venue and _handle_top_speed_query(conversation_history, user_query):
+        return current_response(conversation_history)
+
+    if not awaiting_year and not awaiting_venue and _handle_driver_standing_query(conversation_history, user_query):
         return current_response(conversation_history)
 
     if not awaiting_year and not awaiting_venue and _handle_driver_team_query(conversation_history, user_query):
@@ -2412,6 +2643,42 @@ def process_query(conversation_history: list[dict], user_query: str) -> dict | N
                 country=country,
                 location=location,
                 source=source,
+            )
+            return current_response(conversation_history)
+
+        if pending_kind == "driver_standing":
+            print(" [Router] Resuming driver-standing query after year clarification")
+            original_query = pending["pending_query"]
+            driver_ref = _driver_ref_from_standing_query(original_query, conversation_history)
+            if not driver_ref:
+                prior_ctx = (
+                    _prior_turn_driver_context(conversation_history[-2])
+                    if len(conversation_history) >= 2
+                    else None
+                )
+                driver_ref = prior_ctx["driver_ref"] if prior_ctx else None
+            if not driver_ref:
+                _respond_and_remember(
+                    conversation_history,
+                    user_query,
+                    category,
+                    MISSING_DRIVER_MESSAGE,
+                )
+                return current_response(conversation_history)
+            answer = _lookup_driver_standing(
+                original_query,
+                year,
+                history=conversation_history,
+                driver_ref=driver_ref,
+            )
+            _respond_and_remember(
+                conversation_history,
+                user_query,
+                category,
+                answer,
+                source=csv_driver_standing(year=year),
+                year=year,
+                driver_lookup_query=original_query,
             )
             return current_response(conversation_history)
 
@@ -2580,6 +2847,7 @@ def process_query(conversation_history: list[dict], user_query: str) -> dict | N
     elif category == "historical":
         if not csv_available() and (
             _is_race_results_query(user_query)
+            or _is_driver_standing_query(user_query)
             or _is_driver_team_query(user_query)
             or _is_lap_comparison_query(user_query)
             or (

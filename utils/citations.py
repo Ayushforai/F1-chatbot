@@ -39,6 +39,13 @@ def csv_driver_teams(*, year: int) -> SourceCitation:
     )
 
 
+def csv_driver_standing(*, year: int) -> SourceCitation:
+    return SourceCitation(
+        "csv",
+        f"Historical CSV (driver_standings.csv, races.csv) — {year} season",
+    )
+
+
 def csv_lap_times(*, year: int, venue: str, lap: int | None = None) -> SourceCitation:
     lap_bit = f", lap {lap}" if lap is not None else ""
     return SourceCitation(
