@@ -201,32 +201,44 @@ Example queries:
 
 ## Concurrent users & sessions
 
-Racecoe is safe for **2–3 simultaneous users** on a single server instance: conversations do not mix, but chat requests are **not fully parallel** today.
+Racecoe supports **2–3 simultaneous users** on a single server instance: conversations stay isolated, and **different sessions run in parallel**.
 
-### Session isolation (works correctly)
+### Session isolation
 
 Each browser gets its own `session_id` (UUID in `localStorage`; see `frontend/src/api.js`). The API stores conversation history in an in-memory map keyed by that ID (`server.py` → `_sessions`). User A’s follow-ups never read User B’s history.
 
 Health, calendar, and static assets can be served while chat requests are in flight.
 
-### Global chat lock (main bottleneck)
+### Per-session locking (parallel across users)
 
-All `/api/chat` and `/chat` requests acquire **one process-wide lock** for the entire `process_query()` run (routing LLM + RAG/CSV/API lookup + answer LLM — often 5–30+ seconds):
+Chat uses **one lock per `session_id`**, not one lock for the whole server:
 
 ```python
 # server.py — simplified
-with _lock:
+with _session_lock(session_id):
     history = _sessions.setdefault(session_id, [])
     return process_query(history, message)
 ```
 
 | Users chatting at once | Behaviour |
 |------------------------|-----------|
-| **1** | Normal latency |
-| **2–3** | **Correct answers**, but requests **queue** — User 2 waits until User 1’s turn finishes, then User 3, and so on |
-| **Many / public traffic** | Not recommended without architectural changes (per-session locks, external session store, rate limits) |
+| **Different sessions** | Run **in parallel** (Gemini/OpenF1 I/O overlaps; CSV paths are fast) |
+| **Same session** (double-submit, two tabs sharing `localStorage`) | **Serialized** so conversation history stays consistent |
+| **Many / public traffic** | Still limited by Gemini rate limits, RAM, and in-memory sessions |
 
-Regression coverage: `tests/test_concurrent_sessions.py` (session isolation + serialized lock behaviour).
+RAG vector search serializes only the **embedding encode** step (`utils/embeddings.py` → `embedding_inference()`), not the full pipeline — so two users on CSV/OpenF1 queries stay fully parallel; two RAG queries share the model safely with a brief encode queue.
+
+Regression coverage: `tests/test_concurrent_sessions.py` (isolation, cross-session parallelism, same-session serialization).
+
+### Memory impact of concurrency
+
+| Change | Extra RAM |
+|--------|-----------|
+| Per-session locks | Negligible (~one `threading.Lock` per browser session) |
+| Embedding inference lock | None (same single model as before) |
+| Parallel chat turns | Slightly higher **peak** while multiple LLM/RAG pipelines run at once (request buffers + torch activations during encode), not duplicate models |
+
+On **Render free (512MB)**, two simultaneous RAG questions are the riskiest case — functionally correct, but watch for slow responses or OOM; Standard (2GB) is safer under load.
 
 ### Other multi-user limits
 
@@ -243,8 +255,8 @@ Regression coverage: `tests/test_concurrent_sessions.py` (session isolation + se
 
 | Scenario | OK? |
 |----------|-----|
-| Demo, portfolio site, a few friends at once | **Yes** — isolated sessions, possible wait during someone else’s long RAG answer |
-| High-traffic public chat | **No** — needs per-session locking (or similar), session persistence, and rate limiting |
+| Demo, portfolio site, a few friends at once | **Yes** — isolated sessions, parallel turns across users |
+| High-traffic public chat | **No** — needs external session store, rate limiting, and more RAM |
 
 ## Evaluation
 
@@ -282,7 +294,7 @@ Representative regressions that now have dedicated tests (named after issue IDs)
 
 | Suite | Scope | Count (current) | How to run |
 |-------|--------|-----------------|------------|
-| Python unit tests | Router, CSV/RAG paths, venues, API wrapper, Gemini client, regulations, follow-ups, concurrent sessions | **228** cases in `tests/` | `PYTHONPATH=. python -m unittest discover -s tests -v` |
+| Python unit tests | Router, CSV/RAG paths, venues, API wrapper, Gemini client, regulations, follow-ups, concurrent sessions | **229** cases in `tests/` | `PYTHONPATH=. python -m unittest discover -s tests -v` |
 | Frontend formatting | Answer markdown / race list rendering | **4** cases | `cd frontend && node --test src/formatAnswer.test.js` |
 | In-process deploy smoke | Monaco 2021 → “who was third?” stickiness + `/api/health` | **2** assertions | `PYTHONPATH=. python scripts/smoke_deploy.py` |
 | HTTP / production smoke | Same follow-up against a running server | Live gate | `python scripts/smoke_deploy.py --http --base-url URL` |
@@ -323,7 +335,7 @@ These are binary / structural checks used instead of BLEU/RAGAS:
 - **Citation present** — answers append a source footer (P02).
 - **Multi-GP safety** — Italy/USA/etc. require venue choice before answering.
 
-> Note: Racecoe does **not** yet publish a held-out LLM accuracy % (e.g. RAGAS faithfulness). Quality is measured by the issue closure rate, the 228 automated regressions, and deploy smoke gates above.
+> Note: Racecoe does **not** yet publish a held-out LLM accuracy % (e.g. RAGAS faithfulness). Quality is measured by the issue closure rate, the 229 automated regressions, and deploy smoke gates above.
 
 ## Testing
 
@@ -468,6 +480,6 @@ python app.py
 | **Hugging Face cache** | Mount or bake `~/.cache/huggingface`, or set `HF_HOME`, so embedding weights persist across container restarts. |
 | **Serverless / scale-to-zero** | Every cold start reloads the embedding model unless you use provisioned concurrency or a managed embedding API. |
 | **Multiple workers** | Each worker holds its own copy of the embedding model (~400MB). Prefer 1–2 workers with async, or a shared external embedding service. |
-| **Concurrent chat users** | Sessions are isolated, but a **global lock** serializes all chat turns — see [Concurrent users & sessions](#concurrent-users--sessions). |
+| **Concurrent chat users** | Per-session locks — different users chat in parallel; see [Concurrent users & sessions](#concurrent-users--sessions). |
 
 Do **not** spawn a fresh Python process per query in production — that would reload weights every time regardless of in-process caching.

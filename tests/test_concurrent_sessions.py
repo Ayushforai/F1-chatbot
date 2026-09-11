@@ -13,16 +13,21 @@ from fastapi.testclient import TestClient
 import server
 
 
+def _clear_sessions() -> None:
+    server._sessions.clear()
+    server._session_locks.clear()
+
+
 class TestConcurrentSessions(unittest.TestCase):
     def setUp(self):
         server._ready = True
         server._ready_error = None
-        server._sessions.clear()
+        _clear_sessions()
         self.client = TestClient(server.app)
 
     def tearDown(self):
         self.client.close()
-        server._sessions.clear()
+        _clear_sessions()
 
     def test_different_sessions_do_not_share_history(self):
         def record(history, message):
@@ -53,8 +58,7 @@ class TestConcurrentSessions(unittest.TestCase):
         self.assertEqual(server._sessions["session-a"][0]["query"], "user-a")
         self.assertEqual(server._sessions["session-b"][0]["query"], "user-b")
 
-    def test_global_lock_serializes_all_chat_requests(self):
-        """Document current behavior: one global lock queues every session."""
+    def test_different_sessions_run_in_parallel(self):
         order: list[tuple[str, str]] = []
         active = {"count": 0, "peak": 0}
         track = threading.Lock()
@@ -92,13 +96,49 @@ class TestConcurrentSessions(unittest.TestCase):
             for thread in threads:
                 thread.join()
 
-        # If requests ran in parallel, peak would be > 1.
-        self.assertEqual(active["peak"], 1)
+        self.assertGreater(active["peak"], 1)
         starts = [item for item in order if item[0] == "start"]
-        ends = [item for item in order if item[0] == "end"]
         self.assertEqual(len(starts), 3)
-        self.assertEqual(len(ends), 3)
-        # Fully serialized: each request finishes before the next starts.
+
+    def test_same_session_stays_serialized(self):
+        order: list[tuple[str, str]] = []
+        active = {"count": 0, "peak": 0}
+        track = threading.Lock()
+
+        def slow_process(history, message):
+            with track:
+                active["count"] += 1
+                active["peak"] = max(active["peak"], active["count"])
+                order.append(("start", message))
+            time.sleep(0.1)
+            with track:
+                active["count"] -= 1
+                order.append(("end", message))
+            history.append({"query": message})
+            return {
+                "answer": message,
+                "body": message,
+                "citation": None,
+                "category": "historical",
+                "awaiting_year": False,
+                "awaiting_venue": False,
+            }
+
+        with patch.object(server, "process_query", side_effect=slow_process):
+            threads = []
+            for idx in range(2):
+                thread = threading.Thread(
+                    target=lambda i=idx: self.client.post(
+                        "/api/chat",
+                        json={"message": f"m{i}", "session_id": "shared"},
+                    )
+                )
+                threads.append(thread)
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+        self.assertEqual(active["peak"], 1)
         self.assertEqual(order[0][0], "start")
         self.assertEqual(order[1][0], "end")
 
