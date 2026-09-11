@@ -212,6 +212,7 @@ export function Hero({ tab, onTab, year }) {
     <section className="hero page-pad">
       <div className="speed-lines" />
       <h1>Racecoe</h1>
+      <p className="hero-tagline">Hybrid Formula 1 chatbot: Live telemetry, race history, and FIA regulations</p>
       <div className="tabs">
         <button className={tab === "chat" ? "active" : ""} onClick={() => onTab("chat")}>
           Chat

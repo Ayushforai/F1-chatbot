@@ -338,10 +338,20 @@
   animation: page-in 0.45s ease both;
 }
 
+.hero-tagline {
+  margin: 12px 0 0;
+  max-width: 42ch;
+  font-size: clamp(13px, 2vw, 15px);
+  line-height: 1.55;
+  color: var(--f1-muted);
+  letter-spacing: 0.01em;
+  animation: page-in 0.45s ease 0.06s both;
+}
+
 .tabs {
   display: flex;
   gap: 28px;
-  margin-top: 22px;
+  margin-top: 20px;
   border-bottom: 1px solid #2a2a33;
 }
 
