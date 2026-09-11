@@ -54,8 +54,10 @@ Embeddings stay on **Hugging Face** (`BAAI/bge-base-en-v1.5`) in both environmen
 
 ### Live & quantitative data
 - **OpenF1 integration** — fastest lap, specific-lap lookups, and live telemetry when a session is actually live
+- **Session-aware fastest laps** — practice (FP1/FP2/FP3), qualifying, sprint, and race fastest-lap queries hit OpenF1 directly; “latest fp2 session” resolves via `session_key=latest` without needing a Grand Prix in the question (no LLM round-trip)
 - **Lap time formatting** — API responses use F1-style `M:SS.mmm` display
 - **Top-speed lookup** — highest speed-trap readings via OpenF1 (2021+) and fastest-lap speeds from CSV; handles all-time and GP-specific queries
+- **OpenF1 timeouts** — HTTP calls use a 15s timeout so a stuck API cannot hang chat indefinitely
 
 ### Historical data (CSV + RAG)
 - **Full race classifications** — pre-2026 result queries use CSV directly: every finisher, DNFs, and fastest laps (not just the top 10)
@@ -192,6 +194,7 @@ Example queries:
 |---|---|
 | `What is the cost cap for 2026?` | Financial regulations (RAG) |
 | `What was Verstappen's lap 12 time at Monza 2024?` | OpenF1 lap lookup |
+| `What was Hamilton's fastest lap in the latest FP2 session?` | OpenF1 latest practice session (direct API) |
 | `Results of Monaco GP 2021` | CSV full classification |
 | `Which team did Hamilton drive for in 2012?` | CSV driver-team lookup |
 | `Time delta between Bottas and Stroll on lap 32 of Azerbaijan GP 2017?` | CSV lap-time delta |
@@ -294,7 +297,7 @@ Representative regressions that now have dedicated tests (named after issue IDs)
 
 | Suite | Scope | Count (current) | How to run |
 |-------|--------|-----------------|------------|
-| Python unit tests | Router, CSV/RAG paths, venues, API wrapper, Gemini client, regulations, follow-ups, concurrent sessions | **229** cases in `tests/` | `PYTHONPATH=. python -m unittest discover -s tests -v` |
+| Python unit tests | Router, CSV/RAG paths, venues, API wrapper, Gemini client, regulations, follow-ups, concurrent sessions, session fastest lap | **235** cases in `tests/` | `PYTHONPATH=. python -m unittest discover -s tests -v` |
 | Frontend formatting | Answer markdown / race list rendering | **4** cases | `cd frontend && node --test src/formatAnswer.test.js` |
 | In-process deploy smoke | Monaco 2021 → “who was third?” stickiness + `/api/health` | **2** assertions | `PYTHONPATH=. python scripts/smoke_deploy.py` |
 | HTTP / production smoke | Same follow-up against a running server | Live gate | `python scripts/smoke_deploy.py --http --base-url URL` |
@@ -335,7 +338,7 @@ These are binary / structural checks used instead of BLEU/RAGAS:
 - **Citation present** — answers append a source footer (P02).
 - **Multi-GP safety** — Italy/USA/etc. require venue choice before answering.
 
-> Note: Racecoe does **not** yet publish a held-out LLM accuracy % (e.g. RAGAS faithfulness). Quality is measured by the issue closure rate, the 229 automated regressions, and deploy smoke gates above.
+> Note: Racecoe does **not** yet publish a held-out LLM accuracy % (e.g. RAGAS faithfulness). Quality is measured by the issue closure rate, the 235 automated regressions, and deploy smoke gates above.
 
 ## Testing
 
@@ -380,7 +383,7 @@ utils/
   citations.py          # Source footer formatting for answers
   embeddings.py         # HuggingFace embeddings (singleton cache, HF_TOKEN)
   vector_store.py       # FAISS search wrapper (per-category index cache)
-tests/                  # Regression tests (incl. test_concurrent_sessions.py)
+tests/                  # Regression tests (incl. test_concurrent_sessions.py, test_session_fastest_lap.py)
 data/
   *.pdf                 # FIA regulation documents
   historical_csvs/      # Race results, drivers, constructors, lap times, etc.

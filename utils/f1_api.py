@@ -1,3 +1,4 @@
+import re
 from datetime import datetime, timedelta, timezone
 
 import requests
@@ -5,6 +6,7 @@ import requests
 from utils.venues import MULTI_GP_COUNTRIES, multi_gp_clarification
 
 BASE_URL = "https://api.openf1.org/v1"
+REQUEST_TIMEOUT = 15
 
 # OpenF1 treats data as live from 30 minutes before a session starts until 30 minutes after it ends.
 LIVE_WINDOW_PADDING = timedelta(minutes=30)
@@ -57,7 +59,7 @@ def get_driver_telemetry(driver_number: int, now: datetime | None = None):
     cannot serve live car data), returns LIVE_DATA_UNAVAILABLE_MESSAGE.
     """
     try:
-        session_res = requests.get(f"{BASE_URL}/sessions?session_key=latest")
+        session_res = _http_get(f"{BASE_URL}/sessions", params={"session_key": "latest"})
         if session_res.status_code != 200:
             return LIVE_DATA_UNAVAILABLE_MESSAGE
 
@@ -69,8 +71,9 @@ def get_driver_telemetry(driver_number: int, now: datetime | None = None):
         if not session_is_live(latest_session, now=now):
             return LIVE_DATA_UNAVAILABLE_MESSAGE
 
-        car_res = requests.get(
-            f"{BASE_URL}/car_data?driver_number={driver_number}&session_key=latest"
+        car_res = _http_get(
+            f"{BASE_URL}/car_data",
+            params={"driver_number": driver_number, "session_key": "latest"},
         )
         if car_res.status_code != 200:
             return LIVE_DATA_UNAVAILABLE_MESSAGE
@@ -96,6 +99,171 @@ def _payload_list(payload) -> list:
     return payload if isinstance(payload, list) else []
 
 
+def _http_get(url: str, *, params: dict | None = None, timeout: int = REQUEST_TIMEOUT):
+    return requests.get(url, params=params, timeout=timeout)
+
+
+_SESSION_NAME_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"\bfp\s*1\b|\bfp1\b|\bpractice\s*1\b", re.I), "Practice 1"),
+    (re.compile(r"\bfp\s*2\b|\bfp2\b|\bpractice\s*2\b", re.I), "Practice 2"),
+    (re.compile(r"\bfp\s*3\b|\bfp3\b|\bpractice\s*3\b", re.I), "Practice 3"),
+    (re.compile(r"\bsprint\s+qualifying\b", re.I), "Sprint Qualifying"),
+    (re.compile(r"\bqualifying\b|\bquali\b|\bpole\s+session\b", re.I), "Qualifying"),
+    (re.compile(r"\bsprint\b(?!\s+qual)", re.I), "Sprint"),
+    (re.compile(r"\brace\b|\bgrand\s+prix\s+race\b", re.I), "Race"),
+)
+
+
+def parse_openf1_session_name(query: str) -> str | None:
+    """Map natural language (fp2, qualifying, …) to OpenF1 session_name values."""
+    for pattern, session_name in _SESSION_NAME_PATTERNS:
+        if pattern.search(query):
+            return session_name
+    if re.search(r"\bpractice\b", query, re.I):
+        return "Practice 1"
+    return None
+
+
+def query_asks_latest_session(query: str) -> bool:
+    q = query.lower()
+    return any(
+        phrase in q
+        for phrase in (
+            "latest",
+            "most recent",
+            "last session",
+            "current session",
+            "recent session",
+            "last fp",
+            "latest fp",
+        )
+    )
+
+
+def query_asks_fastest_lap(query: str) -> bool:
+    q = query.lower()
+    return any(
+        phrase in q
+        for phrase in (
+            "fastest lap",
+            "quickest lap",
+            "best lap",
+            "fastest time",
+            "quick lap",
+        )
+    )
+
+
+def _session_label(session: dict) -> str:
+    location = session.get("location") or session.get("circuit_short_name") or "Grand Prix"
+    year = session.get("year") or ""
+    session_name = session.get("session_name") or "Session"
+    country = session.get("country_name")
+    if country:
+        return f"{year} {location}, {country} ({session_name})"
+    return f"{year} {location} ({session_name})"
+
+
+def fetch_latest_session(
+    session_name: str | None = None,
+    now: datetime | None = None,
+) -> dict | str:
+    """Return the most recent OpenF1 session, optionally filtered by session_name."""
+    now = now or datetime.now(timezone.utc)
+    try:
+        if session_name is None:
+            res = _http_get(f"{BASE_URL}/sessions", params={"session_key": "latest"})
+            if res.status_code != 200:
+                return "Could not resolve the latest session from OpenF1."
+            sessions = _payload_list(res.json())
+            return sessions[0] if sessions else "No session data found on OpenF1."
+
+        res = _http_get(f"{BASE_URL}/sessions", params={"session_key": "latest"})
+        if res.status_code == 200:
+            sessions = _payload_list(res.json())
+            if sessions and sessions[0].get("session_name") == session_name:
+                return sessions[0]
+
+        for year in (now.year, now.year - 1):
+            sessions = _fetch_sessions_for_year(year, session_name, now=now)
+            if isinstance(sessions, str):
+                continue
+            if sessions:
+                return max(sessions, key=lambda row: str(row.get("date_start") or ""))
+
+        if now.year >= datetime.now(timezone.utc).year:
+            return SESSION_NOT_HELD_MESSAGE
+        label = session_name
+        return f"Database Error: Could not locate a {label} session."
+
+    except requests.RequestException as exc:
+        return f"Historical Archive Error: {str(exc)}"
+
+
+def get_fastest_lap_for_session(
+    session: dict,
+    driver_number: int | None = None,
+    now: datetime | None = None,
+) -> dict | str:
+    """Fastest lap in any OpenF1 session (practice, qualifying, race, …)."""
+    _ = now
+    try:
+        session_key = session["session_key"]
+        label = _session_label(session)
+
+        laps_res = _http_get(f"{BASE_URL}/laps", params={"session_key": session_key})
+        laps_data = _payload_list(laps_res.json()) if laps_res.status_code == 200 else []
+        if not laps_data:
+            return "No lap data found for this session."
+
+        valid_laps = [
+            lap
+            for lap in laps_data
+            if lap.get("lap_duration") is not None and not lap.get("is_pit_out_lap")
+        ]
+        if driver_number is not None:
+            valid_laps = [lap for lap in valid_laps if lap.get("driver_number") == driver_number]
+
+        if not valid_laps:
+            if driver_number is not None:
+                return f"No valid lap data found for Driver {driver_number} in this session."
+            return "No valid lap times found for this session."
+
+        fastest_lap = min(valid_laps, key=lambda row: row["lap_duration"])
+        target_driver = fastest_lap["driver_number"]
+
+        driver_res = _http_get(
+            f"{BASE_URL}/drivers",
+            params={"session_key": session_key, "driver_number": target_driver},
+        )
+        driver_payload = _payload_list(driver_res.json()) if driver_res.status_code == 200 else []
+        driver_name = (
+            driver_payload[0]["full_name"]
+            if driver_payload
+            else f"Driver {target_driver}"
+        )
+
+        return {
+            "session_label": label,
+            "session_name": session.get("session_name"),
+            "driver": driver_name,
+            "driver_number": target_driver,
+            "lap_number": fastest_lap["lap_number"],
+            "lap_time": format_lap_time(fastest_lap["lap_duration"]),
+            "lap_time_seconds": fastest_lap["lap_duration"],
+            "average_speed": fastest_lap.get("st_speed"),
+        }
+    except Exception as exc:
+        return f"Historical Archive Error: {str(exc)}"
+
+
+def format_fastest_lap_lookup(packet: dict) -> str:
+    return (
+        f"In **{packet['session_label']}**, **{packet['driver']}** set a fastest lap of "
+        f"**{packet['lap_time']}** on lap **{packet['lap_number']}**."
+    )
+
+
 def fetch_session(
     year: int,
     country: str,
@@ -106,7 +274,7 @@ def fetch_session(
     """Return the OpenF1 session dict for a Grand Prix weekend, or an error string."""
     now = now or datetime.now(timezone.utc)
     try:
-        res = requests.get(
+        res = _http_get(
             f"{BASE_URL}/sessions",
             params={"country_name": country, "year": year, "session_name": session_name},
         )
@@ -181,40 +349,11 @@ def get_fastest_lap_of_race(
         if isinstance(session, str):
             return session
 
-        session_key = session["session_key"]
-        race_label = f"{session.get('location') or country} {year}"
-
-        laps_res = requests.get(f"{BASE_URL}/laps", params={"session_key": session_key})
-        laps_data = _payload_list(laps_res.json()) if laps_res.status_code == 200 else []
-
-        if not laps_data:
-            return "No lap data found for this session."
-
-        valid_laps = [lap for lap in laps_data if lap.get("lap_duration") is not None]
-
-        if driver_number is not None:
-            valid_laps = [lap for lap in valid_laps if lap.get("driver_number") == driver_number]
-
-        if not valid_laps:
-            return f"No valid lap data found for Driver {driver_number} in this session."
-
-        fastest_lap = min(valid_laps, key=lambda x: x["lap_duration"])
-
-        driver_res = requests.get(
-            f"{BASE_URL}/drivers",
-            params={"session_key": session_key, "driver_number": fastest_lap["driver_number"]},
-        )
-        driver_payload = _payload_list(driver_res.json()) if driver_res.status_code == 200 else []
-        driver_name = driver_payload[0]["full_name"] if driver_payload else f"Driver {fastest_lap['driver_number']}"
-
-        return {
-            "race": race_label,
-            "driver": driver_name,
-            "lap_number": fastest_lap["lap_number"],
-            "lap_time": format_lap_time(fastest_lap["lap_duration"]),
-            "lap_time_seconds": fastest_lap["lap_duration"],
-            "average_speed": fastest_lap.get("st_speed"),
-        }
+        result = get_fastest_lap_for_session(session, driver_number=driver_number, now=now)
+        if isinstance(result, str):
+            return result
+        result["race"] = f"{session.get('location') or country} {year}"
+        return result
 
     except Exception as e:
         return f"Historical Archive Error: {str(e)}"
@@ -237,7 +376,7 @@ def get_historical_lap(
         session_key = session["session_key"]
         race_label = f"{session.get('location') or country} {year}"
 
-        laps_res = requests.get(
+        laps_res = _http_get(
             f"{BASE_URL}/laps",
             params={
                 "session_key": session_key,
@@ -252,7 +391,7 @@ def get_historical_lap(
 
         lap = laps_data[0]
 
-        driver_res = requests.get(
+        driver_res = _http_get(
             f"{BASE_URL}/drivers",
             params={"session_key": session_key, "driver_number": driver_number},
         )
@@ -309,7 +448,7 @@ def _max_trap_from_session(
     if driver_number is not None:
         params["driver_number"] = driver_number
 
-    laps_res = requests.get(f"{BASE_URL}/laps", params=params)
+    laps_res = _http_get(f"{BASE_URL}/laps", params=params)
     laps_data = _payload_list(laps_res.json()) if laps_res.status_code == 200 else []
     if not laps_data:
         return None
@@ -331,7 +470,7 @@ def _max_trap_from_session(
     if best_lap is None or best_speed is None:
         return None
 
-    driver_res = requests.get(
+    driver_res = _http_get(
         f"{BASE_URL}/drivers",
         params={
             "session_key": session_key,
@@ -372,11 +511,11 @@ def _fetch_sessions_for_year(
     """Return completed OpenF1 sessions for a calendar year, or an error string."""
     now = now or datetime.now(timezone.utc)
     try:
-        res = requests.get(
+        res = _http_get(
             f"{BASE_URL}/sessions",
             params={"year": year, "session_name": session_name},
         )
-    except Exception as e:
+    except requests.RequestException as e:
         return f"Historical Archive Error: {str(e)}"
 
     if res.status_code == 429:
@@ -385,6 +524,8 @@ def _fetch_sessions_for_year(
     sessions = _payload_list(res.json()) if res.status_code == 200 else []
     completed: list[dict] = []
     for session in sessions:
+        if session.get("is_cancelled"):
+            continue
         start = _parse_iso(session.get("date_start"))
         if start and start > now:
             continue
@@ -478,11 +619,7 @@ def get_max_speed_trap(
 def fetch_year_meetings(year: int) -> list[dict]:
     """Return OpenF1 meetings for a season, oldest round first."""
     try:
-        res = requests.get(
-            f"{BASE_URL}/meetings",
-            params={"year": year},
-            timeout=12,
-        )
+        res = _http_get(f"{BASE_URL}/meetings", params={"year": year})
     except requests.RequestException:
         return []
     if res.status_code != 200:
@@ -492,10 +629,9 @@ def fetch_year_meetings(year: int) -> list[dict]:
 
     race_dates: dict[int, str] = {}
     try:
-        race_res = requests.get(
+        race_res = _http_get(
             f"{BASE_URL}/sessions",
             params={"year": year, "session_name": "Race"},
-            timeout=12,
         )
         if race_res.status_code == 200:
             for session in _payload_list(race_res.json()):
@@ -559,19 +695,17 @@ def get_openf1_session_classification(
 
     session_key = session["session_key"]
     try:
-        res = requests.get(
+        res = _http_get(
             f"{BASE_URL}/session_result",
             params={"session_key": session_key},
-            timeout=12,
         )
         results = _payload_list(res.json()) if res.status_code == 200 else []
         if not results:
             return f"No {session_name} results found for this session."
 
-        drivers_res = requests.get(
+        drivers_res = _http_get(
             f"{BASE_URL}/drivers",
             params={"session_key": session_key},
-            timeout=12,
         )
         drivers = {
             row["driver_number"]: row

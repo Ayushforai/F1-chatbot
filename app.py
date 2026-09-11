@@ -23,12 +23,19 @@ from utils.router import (
 from utils.f1_api import (
     LIVE_DATA_UNAVAILABLE_MESSAGE,
     SESSION_NOT_HELD_MESSAGE,
+    fetch_latest_session,
+    fetch_session,
+    format_fastest_lap_lookup,
     get_driver_telemetry,
+    get_fastest_lap_for_session,
     get_fastest_lap_of_race,
     get_historical_lap,
     get_max_speed_trap,
     get_max_speed_trap_season,
     get_openf1_session_classification,
+    parse_openf1_session_name,
+    query_asks_fastest_lap,
+    query_asks_latest_session,
 )
 from utils.vector_store import search_regulations, search_with_metadata, warmup_rag
 from utils.citations import (
@@ -1372,6 +1379,46 @@ def resolve_quantitative_query(params: dict, user_query: str = "") -> dict:
 
     venue_detail = venue_label(year=year, country=country, location=location)
 
+    session_name = params.get("session_name") or parse_openf1_session_name(user_query)
+    wants_latest = query_asks_latest_session(user_query)
+
+    if q_type == "fastest_lap" and (wants_latest or session_name) and not country:
+        label = session_name or "latest session"
+        print(f" [OpenF1] Resolving {label} for fastest-lap lookup...")
+        session = fetch_latest_session(session_name)
+        if isinstance(session, str):
+            return {"kind": "error", "message": session}
+        telemetry_data = get_fastest_lap_for_session(session, driver_number=driver)
+        if isinstance(telemetry_data, str):
+            return {"kind": "error", "message": telemetry_data}
+        return {
+            "kind": "context",
+            "context": f"OpenF1 Fastest Lap Record: {telemetry_data}",
+            "source": openf1_api(
+                endpoint=f"fastest lap ({session.get('session_name')})",
+                detail=telemetry_data.get("session_label", label),
+            ),
+        }
+
+    if q_type == "fastest_lap" and country and session_name:
+        print(f" [OpenF1] Scanning {year} {country} {session_name} for the fastest lap...")
+        session = fetch_session(year, country, session_name=session_name, location=location)
+        if isinstance(session, str):
+            if session == SESSION_NOT_HELD_MESSAGE:
+                return {"kind": "error", "message": session}
+            return {"kind": "error", "message": session}
+        telemetry_data = get_fastest_lap_for_session(session, driver_number=driver)
+        if isinstance(telemetry_data, str):
+            return {"kind": "error", "message": telemetry_data}
+        return {
+            "kind": "context",
+            "context": f"OpenF1 Fastest Lap Record: {telemetry_data}",
+            "source": openf1_api(
+                endpoint=f"fastest lap ({session_name})",
+                detail=venue_detail,
+            ),
+        }
+
     if q_type == "fastest_lap" and country:
         print(f" [API Connection] Scanning {year} {country} archives for the fastest lap...")
         telemetry_data = get_fastest_lap_of_race(year, country, driver, location=location)
@@ -1733,6 +1780,83 @@ def _lookup_top_speed(
         extra["year_start"] = year_start
         extra["year_end"] = year_end
     return answer, source, extra
+
+
+def _is_session_fastest_lap_query(user_query: str) -> bool:
+    if not query_asks_fastest_lap(user_query):
+        return False
+    if parse_openf1_session_name(user_query):
+        return True
+    return query_asks_latest_session(user_query)
+
+
+def _lookup_session_fastest_lap(user_query: str, *, driver_number: int | None) -> tuple[str, SourceCitation | None]:
+    session_name = parse_openf1_session_name(user_query)
+    venue = resolve_venue(query=user_query)
+    year = _explicit_year(user_query)
+
+    if venue["kind"] == "ok" and session_name and year is not None:
+        print(f" [OpenF1] Fastest lap in {year} {session_name} at {venue['country']}...")
+        session = fetch_session(
+            year,
+            venue["country"],
+            session_name=session_name,
+            location=venue.get("location"),
+        )
+    elif venue["kind"] == "ok" and session_name:
+        print(f" [OpenF1] Fastest lap in latest {session_name} at {venue['country']}...")
+        session = fetch_session(
+            year or DEFAULT_YEAR,
+            venue["country"],
+            session_name=session_name,
+            location=venue.get("location"),
+        )
+    else:
+        label = session_name or "latest session"
+        print(f" [OpenF1] Fastest lap lookup for {label}...")
+        session = fetch_latest_session(session_name)
+
+    if isinstance(session, str):
+        return session, None
+
+    packet = get_fastest_lap_for_session(session, driver_number=driver_number)
+    if isinstance(packet, str):
+        return packet, None
+
+    detail = packet.get("session_label") or session.get("session_name") or "OpenF1"
+    source = openf1_api(
+        endpoint=f"fastest lap ({session.get('session_name')})",
+        detail=detail,
+    )
+    return format_fastest_lap_lookup(packet), source
+
+
+def _handle_session_fastest_lap_query(conversation_history: list[dict], user_query: str) -> bool:
+    """Answer fastest-lap questions for FP/qualifying/sprint/latest sessions via OpenF1."""
+    if not _is_session_fastest_lap_query(user_query):
+        return False
+
+    params = enrich_telemetry_params({}, user_query)
+    driver = params.get("driver_number")
+    if not _has_driver(driver):
+        _respond_and_remember(
+            conversation_history,
+            user_query,
+            "quantitative",
+            MISSING_DRIVER_MESSAGE,
+        )
+        return True
+
+    answer, source = _lookup_session_fastest_lap(user_query, driver_number=driver)
+    _respond_and_remember(
+        conversation_history,
+        user_query,
+        "quantitative",
+        answer,
+        source=source,
+        lookup_params={"query_type": "fastest_lap", "driver_number": driver},
+    )
+    return True
 
 
 def _handle_top_speed_query(conversation_history: list[dict], user_query: str) -> bool:
@@ -2324,6 +2448,11 @@ def process_query(conversation_history: list[dict], user_query: str) -> dict | N
         return current_response(conversation_history)
 
     if not awaiting_year and not awaiting_venue and _handle_top_speed_query(conversation_history, user_query):
+        return current_response(conversation_history)
+
+    if not awaiting_year and not awaiting_venue and _handle_session_fastest_lap_query(
+        conversation_history, user_query
+    ):
         return current_response(conversation_history)
 
     if not awaiting_year and not awaiting_venue and _handle_driver_team_query(conversation_history, user_query):

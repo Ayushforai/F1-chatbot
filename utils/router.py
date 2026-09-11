@@ -269,8 +269,10 @@ def extract_telemetry_params(user_query: str, history: list[dict] = None) -> dic
         '  "year": int or null (null if the user did not mention a season; do not guess),\n'
         '  "country": string or null (OpenF1 country_name: United Kingdom, United Arab Emirates, Italy, United States, Monaco, ...),\n'
         '  "location": string or null (circuit or city when known, e.g. "Monza", "Imola", "Miami", "Austin", "Las Vegas", "Silverstone"),\n'
+        '  "session_name": string or null (OpenF1 session: "Practice 1", "Practice 2", "Practice 3", "Qualifying", "Sprint", "Race"),\n'
         '  "lap_number": int or null\n'
         "}\n\n"
+        "- Map fp1/fp2/fp3 to Practice 1/2/3. For \"latest fp2\" set session_name=\"Practice 2\" and leave country null.\n\n"
         "CRITICAL rules for 'country' and 'location':\n"
         "- Map Grand Prix names to the OpenF1 country_name (NOT informal synonyms):\n"
         '  "British Grand Prix" / Silverstone / UK / Great Britain -> country="United Kingdom", location="Silverstone",\n'
