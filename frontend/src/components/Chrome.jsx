@@ -2,17 +2,11 @@ import { useEffect, useState } from "react";
 import { fetchCalendar } from "../api.js";
 import { formatWeekend, nextRoundIndex } from "../calendarUi.js";
 import { CountryFlag } from "../flags.jsx";
+import rcLogo from "../assets/rc-logo.png";
+import racecoeLogo from "../assets/racecoe-logo.png";
 
 export function F1Mark() {
-  return (
-    <svg className="f1-mark" viewBox="0 0 86 32" aria-hidden="true">
-      <path
-        fill="#e10600"
-        d="M1 1h32.8l-3.2 7.2H8.4v5.1h18.2l-3.2 7.1H8.4V31H1V1zm41.6 0h13.2L39.6 31H26.6L42.6 1z"
-      />
-      <path fill="#e10600" d="M58 21.5h26V31H54.2l3.8-9.5z" />
-    </svg>
-  );
+  return <img className="f1-mark" src={rcLogo} alt="" aria-hidden="true" />;
 }
 
 const NAV_ITEMS = ["Schedule", "Results", "Standings", "Drivers", "Teams"];
@@ -23,7 +17,7 @@ export default function TopNav({ tab, onTab, onReset }) {
   return (
     <>
       <header className="top-nav">
-        <button className="brand" onClick={() => onTab("chat")} aria-label="F1 Pit Wall">
+        <button className="brand" onClick={() => onTab("chat")} aria-label="Racecoe home">
           <F1Mark />
         </button>
         <nav className="nav-links">
@@ -211,7 +205,9 @@ export function Hero({ tab, onTab, year }) {
   return (
     <section className="hero page-pad">
       <div className="speed-lines" />
-      <h1>Racecoe</h1>
+      <h1>
+        <img className="hero-logo" src={racecoeLogo} alt="Racecoe" />
+      </h1>
       <p className="hero-tagline">Hybrid Formula 1 chatbot: Live telemetry, race history, and FIA regulations</p>
       <div className="tabs">
         <button className={tab === "chat" ? "active" : ""} onClick={() => onTab("chat")}>
