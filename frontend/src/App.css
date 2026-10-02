@@ -11,7 +11,11 @@
   display: grid;
   place-items: center;
   overflow: hidden;
-  animation: intro-fade-out 0.9s ease 2.6s forwards;
+}
+
+.intro.is-exiting {
+  animation: intro-fade-out 0.7s ease forwards;
+  pointer-events: none;
 }
 
 .intro-stage {
@@ -33,7 +37,10 @@
   position: relative;
   z-index: 2;
   opacity: 0;
-  animation: intro-logo-in 0.7s ease 0.08s forwards;
+}
+
+.intro.is-live .intro-logo {
+  animation: intro-logo-in 0.7s ease forwards;
 }
 
 .intro-burst {
@@ -42,7 +49,10 @@
   opacity: 0;
   filter: brightness(1.4) contrast(1.8);
   mix-blend-mode: screen;
-  animation: intro-burst 1.5s cubic-bezier(0.22, 0.61, 0.36, 1) 0.7s forwards;
+}
+
+.intro.is-live .intro-burst {
+  animation: intro-burst 1.5s cubic-bezier(0.22, 0.61, 0.36, 1) 0.15s forwards;
 }
 
 .intro-rays {
@@ -57,7 +67,12 @@
   height: var(--stroke);
   width: var(--ray-w);
   background: #e23c24;
-  animation: intro-line-out 1.45s cubic-bezier(0.22, 0.61, 0.36, 1) 0.72s both;
+  transform: scaleX(0);
+  opacity: 0;
+}
+
+.intro.is-live .intro-line {
+  animation: intro-line-out 1.45s cubic-bezier(0.22, 0.61, 0.36, 1) 0.12s both;
 }
 
 .intro-line--left {
@@ -142,13 +157,26 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .intro,
-  .intro-logo,
+  .intro.is-exiting,
   .intro-burst,
   .intro-line,
   .app-ready > :not(.intro) {
-    animation-duration: 0.01ms !important;
-    animation-delay: 0s !important;
+    animation: none !important;
+  }
+
+  .intro.is-live .intro-logo {
+    animation: none;
+    opacity: 1;
+  }
+
+  .intro.is-live .intro-line {
+    transform: scaleX(1);
+    opacity: 1;
+  }
+
+  .intro.is-exiting {
+    opacity: 0;
+    visibility: hidden;
   }
 }
 
