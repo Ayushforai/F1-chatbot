@@ -22,6 +22,7 @@ status_df = None
 lap_times_df = None
 qualifying_df = None
 sprint_results_df = None
+driver_standings_df = None
 
 try:
     races_df = pd.read_csv(os.path.join(DATA_DIR, "races.csv"))
@@ -33,6 +34,7 @@ try:
     lap_times_df = pd.read_csv(os.path.join(DATA_DIR, "lap_times.csv"))
     qualifying_df = pd.read_csv(os.path.join(DATA_DIR, "qualifying.csv"))
     sprint_results_df = pd.read_csv(os.path.join(DATA_DIR, "sprint_results.csv"))
+    driver_standings_df = pd.read_csv(os.path.join(DATA_DIR, "driver_standings.csv"))
 except FileNotFoundError:
     print(f"Warning: {CSV_UNAVAILABLE_MESSAGE}")
 
@@ -851,6 +853,70 @@ def format_driver_teams(packet: dict) -> str:
         lines.append("")
         lines.append(f"{packet['Driver']} drove for {packet['Teams'][0]['Team']} all season.")
     return "\n".join(lines)
+
+
+def get_driver_standing(year: int, driver_ref: str) -> dict | str:
+    """Return a driver's end-of-season championship position and points."""
+    missing = _require_csv()
+    if missing:
+        return missing
+    if driver_standings_df is None:
+        return "Driver standings data is not available in the historical CSV database."
+
+    try:
+        resolved = _resolve_driver(driver_ref)
+        if resolved is None:
+            return f"Could not find driver '{driver_ref}' in the historical database."
+
+        driver_id, full_name = resolved
+        season_races = races_df[races_df["year"] == year]
+        if season_races.empty:
+            return f"No races found for {year}."
+
+        last_race = season_races.sort_values("round").iloc[-1]
+        last_race_id = int(last_race["raceId"])
+        standing = driver_standings_df[
+            (driver_standings_df["driverId"] == driver_id)
+            & (driver_standings_df["raceId"] == last_race_id)
+        ]
+        if standing.empty:
+            return f"No championship standing found for {full_name} in {year}."
+
+        row = standing.iloc[0]
+        return {
+            "Year": year,
+            "Driver": full_name,
+            "Position": int(row["position"]),
+            "PositionText": str(row["positionText"]),
+            "Points": float(row["points"]),
+            "Wins": int(row["wins"]),
+            "FinalRound": int(last_race["round"]),
+            "FinalRace": last_race["name"],
+        }
+    except Exception as e:
+        return f"Historical Database Error: {str(e)}"
+
+
+def _ordinal(position: int) -> str:
+    if 10 <= position % 100 <= 20:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(position % 10, "th")
+    return f"{position}{suffix}"
+
+
+def format_driver_standing(packet: dict) -> str:
+    """Render a driver's end-of-season championship result."""
+    position = int(packet["Position"])
+    points = packet["Points"]
+    wins = int(packet["Wins"])
+    points_text = f"{points:.0f}" if points == int(points) else f"{points:.1f}"
+    win_word = "win" if wins == 1 else "wins"
+    return (
+        f"In the {packet['Year']} Formula 1 World Championship, "
+        f"{packet['Driver']} finished {_ordinal(position)} "
+        f"with {points_text} points and {wins} race {win_word}."
+    )
 
 
 def get_historical_driver_info(year: int, driver_ref: str, country: str = None, location: str | None = None):
