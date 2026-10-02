@@ -27,7 +27,18 @@ DIST = ROOT / "frontend" / "dist"
 _ready = False
 _ready_error: str | None = None
 _sessions: dict[str, list[dict]] = {}
-_lock = threading.Lock()
+_session_locks: dict[str, threading.Lock] = {}
+_tables_lock = threading.Lock()
+
+
+def _session_lock(session_id: str) -> threading.Lock:
+    """Return a per-session lock (distinct sessions can chat in parallel)."""
+    with _tables_lock:
+        lock = _session_locks.get(session_id)
+        if lock is None:
+            lock = threading.Lock()
+            _session_locks[session_id] = lock
+        return lock
 
 
 def _cors_origins() -> list[str]:
@@ -109,8 +120,9 @@ app.add_middleware(
 
 
 def _run_query(session_id: str, message: str) -> dict | None:
-    with _lock:
-        history = _sessions.setdefault(session_id, [])
+    with _session_lock(session_id):
+        with _tables_lock:
+            history = _sessions.setdefault(session_id, [])
         return process_query(history, message)
 
 
@@ -181,11 +193,19 @@ def calendar(year: int | None = Query(default=None)):
 @app.post("/api/reset")
 def reset(payload: ResetRequest | None = None):
     session_id = ((payload.session_id if payload else None) or "").strip()
-    with _lock:
-        if session_id:
-            _sessions.pop(session_id, None)
-        else:
-            _sessions.clear()
+    if session_id:
+        with _session_lock(session_id):
+            with _tables_lock:
+                _sessions.pop(session_id, None)
+                _session_locks.pop(session_id, None)
+    else:
+        with _tables_lock:
+            session_ids = list(_session_locks.keys())
+        for sid in session_ids:
+            with _session_lock(sid):
+                with _tables_lock:
+                    _sessions.pop(sid, None)
+                    _session_locks.pop(sid, None)
     return {"ok": True, "session_id": session_id or str(uuid.uuid4())}
 
 

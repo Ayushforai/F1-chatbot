@@ -1,8 +1,9 @@
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import TopNav, { Hero, RaceBar } from "./components/Chrome.jsx";
 import Chat, { About } from "./components/Chat.jsx";
 import Calendar from "./components/Calendar.jsx";
 import Footer from "./components/Footer.jsx";
+import Intro from "./components/Intro.jsx";
 import { resetChat } from "./api.js";
 import "./App.css";
 
@@ -11,6 +12,8 @@ export default function App() {
   const [chatKey, setChatKey] = useState(0);
   const [pendingQuery, setPendingQuery] = useState(null);
   const [seasonYear, setSeasonYear] = useState(2026);
+  const [introDone, setIntroDone] = useState(false);
+  const finishIntro = useCallback(() => setIntroDone(true), []);
 
   async function handleReset() {
     try {
@@ -29,7 +32,8 @@ export default function App() {
   }
 
   return (
-    <div className="app">
+    <div className={`app ${introDone ? "app-ready" : "app-waiting"}`}>
+      {introDone ? null : <Intro onDone={finishIntro} />}
       <TopNav tab={tab} onTab={setTab} onReset={handleReset} />
       <RaceBar onOpenSchedule={() => setTab("schedule")} onSeasonYear={setSeasonYear} />
       <div className="main-stage">

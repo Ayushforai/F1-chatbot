@@ -1,4 +1,6 @@
 import os
+import threading
+from contextlib import contextmanager
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -9,6 +11,15 @@ load_dotenv(_PROJECT_ROOT / ".env")
 EMBEDDING_MODEL = "BAAI/bge-base-en-v1.5"
 
 _embeddings = None
+_init_lock = threading.Lock()
+_inference_lock = threading.Lock()
+
+
+@contextmanager
+def embedding_inference():
+    """Serialize encode calls on the shared HuggingFace model (thread-safe)."""
+    with _inference_lock:
+        yield
 
 
 def _hf_token() -> str | None:
@@ -40,7 +51,9 @@ def get_embeddings():
     """Return a process-wide cached embedding model (weights load once)."""
     global _embeddings
     if _embeddings is None:
-        _embeddings = _build_embeddings()
+        with _init_lock:
+            if _embeddings is None:
+                _embeddings = _build_embeddings()
     return _embeddings
 
 

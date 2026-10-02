@@ -15,11 +15,13 @@ class TestFastAPIChatWrapper(unittest.TestCase):
         server._ready = True
         server._ready_error = None
         server._sessions.clear()
+        server._session_locks.clear()
         self.client = TestClient(server.app)
 
     def tearDown(self):
         self.client.close()
         server._sessions.clear()
+        server._session_locks.clear()
         server._ready = True
         server._ready_error = None
 

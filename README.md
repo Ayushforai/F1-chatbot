@@ -54,8 +54,10 @@ Embeddings stay on **Hugging Face** (`BAAI/bge-base-en-v1.5`) in both environmen
 
 ### Live & quantitative data
 - **OpenF1 integration** — fastest lap, specific-lap lookups, and live telemetry when a session is actually live
+- **Session-aware fastest laps** — practice (FP1/FP2/FP3), qualifying, sprint, and race fastest-lap queries hit OpenF1 directly; “latest fp2 session” resolves via `session_key=latest` without needing a Grand Prix in the question (no LLM round-trip)
 - **Lap time formatting** — API responses use F1-style `M:SS.mmm` display
 - **Top-speed lookup** — highest speed-trap readings via OpenF1 (2021+) and fastest-lap speeds from CSV; handles all-time and GP-specific queries
+- **OpenF1 timeouts** — HTTP calls use a 15s timeout so a stuck API cannot hang chat indefinitely
 
 ### Historical data (CSV + RAG)
 - **Full race classifications** — pre-2026 result queries use CSV directly: every finisher, DNFs, and fastest laps (not just the top 10)
@@ -192,12 +194,72 @@ Example queries:
 |---|---|
 | `What is the cost cap for 2026?` | Financial regulations (RAG) |
 | `What was Verstappen's lap 12 time at Monza 2024?` | OpenF1 lap lookup |
+| `What was Hamilton's fastest lap in the latest FP2 session?` | OpenF1 latest practice session (direct API) |
 | `Results of Monaco GP 2021` | CSV full classification |
 | `Which team did Hamilton drive for in 2012?` | CSV driver-team lookup |
 | `Time delta between Bottas and Stroll on lap 32 of Azerbaijan GP 2017?` | CSV lap-time delta |
 | `Which GP in Italy?` → `Monza` | Venue clarification, then lookup |
 | `Who finished second?` | Follow-up from conversation memory |
 | `and in 2023?` (after a driver-team answer) | Follow-up with new season |
+
+## Concurrent users & sessions
+
+Racecoe supports **2–3 simultaneous users** on a single server instance: conversations stay isolated, and **different sessions run in parallel**.
+
+### Session isolation
+
+Each browser gets its own `session_id` (UUID in `localStorage`; see `frontend/src/api.js`). The API stores conversation history in an in-memory map keyed by that ID (`server.py` → `_sessions`). User A’s follow-ups never read User B’s history.
+
+Health, calendar, and static assets can be served while chat requests are in flight.
+
+### Per-session locking (parallel across users)
+
+Chat uses **one lock per `session_id`**, not one lock for the whole server:
+
+```python
+# server.py — simplified
+with _session_lock(session_id):
+    history = _sessions.setdefault(session_id, [])
+    return process_query(history, message)
+```
+
+| Users chatting at once | Behaviour |
+|------------------------|-----------|
+| **Different sessions** | Run **in parallel** (Gemini/OpenF1 I/O overlaps; CSV paths are fast) |
+| **Same session** (double-submit, two tabs sharing `localStorage`) | **Serialized** so conversation history stays consistent |
+| **Many / public traffic** | Still limited by Gemini rate limits, RAM, and in-memory sessions |
+
+RAG vector search serializes only the **embedding encode** step (`utils/embeddings.py` → `embedding_inference()`), not the full pipeline — so two users on CSV/OpenF1 queries stay fully parallel; two RAG queries share the model safely with a brief encode queue.
+
+Regression coverage: `tests/test_concurrent_sessions.py` (isolation, cross-session parallelism, same-session serialization).
+
+### Memory impact of concurrency
+
+| Change | Extra RAM |
+|--------|-----------|
+| Per-session locks | Negligible (~one `threading.Lock` per browser session) |
+| Embedding inference lock | None (same single model as before) |
+| Parallel chat turns | Slightly higher **peak** while multiple LLM/RAG pipelines run at once (request buffers + torch activations during encode), not duplicate models |
+
+On **Render free (512MB)**, two simultaneous RAG questions are the riskiest case — functionally correct, but watch for slow responses or OOM; Standard (2GB) is safer under load.
+
+### Other multi-user limits
+
+| Limit | Detail |
+|-------|--------|
+| **In-memory sessions** | History is lost on process restart; not shared across multiple containers |
+| **No session expiry** | Idle sessions stay in RAM until `/api/reset` or restart |
+| **`POST /api/reset` without `session_id`** | Clears **every** stored session (frontend always sends its own ID) |
+| **Single uvicorn worker** | `Dockerfile` runs one process — expected for this app |
+| **Shared read-only caches** | CSV tables, FAISS indexes, and the embedding model are loaded once and shared safely across readers |
+| **Gemini rate limits** | More concurrent users → higher chance of **429/503** from the LLM API (see Evaluation) |
+
+### Suitability
+
+| Scenario | OK? |
+|----------|-----|
+| Demo, portfolio site, a few friends at once | **Yes** — isolated sessions, parallel turns across users |
+| High-traffic public chat | **No** — needs external session store, rate limiting, and more RAM |
 
 ## Evaluation
 
@@ -235,7 +297,7 @@ Representative regressions that now have dedicated tests (named after issue IDs)
 
 | Suite | Scope | Count (current) | How to run |
 |-------|--------|-----------------|------------|
-| Python unit tests | Router, CSV/RAG paths, venues, API wrapper, Gemini client, regulations, follow-ups | **226** cases in `tests/` | `PYTHONPATH=. python -m unittest discover -s tests -v` |
+| Python unit tests | Router, CSV/RAG paths, venues, API wrapper, Gemini client, regulations, follow-ups, concurrent sessions, session fastest lap | **235** cases in `tests/` | `PYTHONPATH=. python -m unittest discover -s tests -v` |
 | Frontend formatting | Answer markdown / race list rendering | **4** cases | `cd frontend && node --test src/formatAnswer.test.js` |
 | In-process deploy smoke | Monaco 2021 → “who was third?” stickiness + `/api/health` | **2** assertions | `PYTHONPATH=. python scripts/smoke_deploy.py` |
 | HTTP / production smoke | Same follow-up against a running server | Live gate | `python scripts/smoke_deploy.py --http --base-url URL` |
@@ -276,7 +338,7 @@ These are binary / structural checks used instead of BLEU/RAGAS:
 - **Citation present** — answers append a source footer (P02).
 - **Multi-GP safety** — Italy/USA/etc. require venue choice before answering.
 
-> Note: Racecoe does **not** yet publish a held-out LLM accuracy % (e.g. RAGAS faithfulness). Quality is measured by the issue closure rate, the 226 automated regressions, and deploy smoke gates above.
+> Note: Racecoe does **not** yet publish a held-out LLM accuracy % (e.g. RAGAS faithfulness). Quality is measured by the issue closure rate, the 235 automated regressions, and deploy smoke gates above.
 
 ## Testing
 
@@ -321,7 +383,7 @@ utils/
   citations.py          # Source footer formatting for answers
   embeddings.py         # HuggingFace embeddings (singleton cache, HF_TOKEN)
   vector_store.py       # FAISS search wrapper (per-category index cache)
-tests/                  # Regression tests for routing, venues, memory, etc.
+tests/                  # Regression tests (incl. test_concurrent_sessions.py, test_session_fastest_lap.py)
 data/
   *.pdf                 # FIA regulation documents
   historical_csvs/      # Race results, drivers, constructors, lap times, etc.
@@ -338,6 +400,37 @@ ISSUES.md               # Bug backlog and fix history
 - **OpenF1**: Used for 2021+ live and lap data; pre-2026 race results and lap deltas come from CSV
 
 ## RAG performance & deployment
+
+### Cold start & first response
+
+There are two separate “slow first time” moments:
+
+| Phase | What happens | Typical cause |
+|-------|----------------|---------------|
+| **Before “Pit wall active”** | Frontend polls `/api/health` until `ready: true` | Embedding warmup at boot (`F1_SKIP_WARMUP=0`), or FX refresh only when skip-warmup is on |
+| **First chat after ready** | One answer takes much longer than the next | Deferred embedding load (`F1_SKIP_WARMUP=1`), first FAISS index load per category, or Render container wake-up |
+
+**Local / Docker (`F1_SKIP_WARMUP=0`, default in `docker-compose.yml`):**  
+`initialize_pipeline()` loads FX rates and the ~400MB embedding model at startup (~5–60s on CPU). Chat is blocked until warmup finishes, but the **first RAG answer** is usually fast once the UI is ready.
+
+**Render free (512MB, `F1_SKIP_WARMUP=1` in `render.yaml` / `Dockerfile`):**  
+The API becomes ready quickly without loading torch/embeddings (avoids OOM). The **first regulation or historical RAG question** pays the full embedding load on demand. `RAG_WARMUP_CATEGORIES` in `render.yaml` has **no effect** while skip-warmup is enabled — indexes only preload when `warmup_rag()` runs at boot.
+
+**Render spin-down:** Free-tier services sleep after ~15 minutes idle. The next visit waits for container boot before any response.
+
+| Your setup | Best way to reduce first-response latency |
+|------------|---------------------------------------------|
+| **Local dev** | Leave `F1_SKIP_WARMUP` unset; set `RAG_WARMUP_CATEGORIES=historical,sporting,financial,technical,operational,general` in `.env` |
+| **Render Standard (2GB+)** | Set `F1_SKIP_WARMUP=0` + full `RAG_WARMUP_CATEGORIES` (see `render.yaml` comment) |
+| **Render free** | External keep-alive ping on `/api/health` every ~10 min; accept a slow first RAG answer after a fresh boot |
+
+Query-type impact on first answer after ready:
+
+| Query type | First-query penalty (after ready) |
+|------------|-----------------------------------|
+| Regulations / historical RAG | Embedding model + FAISS index (worst on skip-warmup) |
+| CSV race results, driver teams | Usually fast — CSVs already in memory |
+| OpenF1 / live telemetry | Network + Gemini; no embedding load |
 
 ### What stays loaded
 
@@ -390,5 +483,6 @@ python app.py
 | **Hugging Face cache** | Mount or bake `~/.cache/huggingface`, or set `HF_HOME`, so embedding weights persist across container restarts. |
 | **Serverless / scale-to-zero** | Every cold start reloads the embedding model unless you use provisioned concurrency or a managed embedding API. |
 | **Multiple workers** | Each worker holds its own copy of the embedding model (~400MB). Prefer 1–2 workers with async, or a shared external embedding service. |
+| **Concurrent chat users** | Per-session locks — different users chat in parallel; see [Concurrent users & sessions](#concurrent-users--sessions). |
 
 Do **not** spawn a fresh Python process per query in production — that would reload weights every time regardless of in-process caching.

@@ -3,7 +3,7 @@ import os
 
 from langchain_community.vectorstores import FAISS
 
-from utils.embeddings import get_embeddings, preload_embeddings
+from utils.embeddings import embedding_inference, get_embeddings, preload_embeddings
 
 VECTOR_STORE_ROOT = "./vector_store"
 REGULATION_CATEGORIES = frozenset({"general", "sporting", "technical", "financial", "operational"})
@@ -117,7 +117,8 @@ def search_with_metadata(category: str, query: str, k: int = 5) -> tuple[list[st
         return search_regulations(category, query, year=None, k=k)
 
     store = get_vector_store(category)
-    docs = store.similarity_search(query, k=k)
+    with embedding_inference():
+        docs = store.similarity_search(query, k=k)
     contents = [doc.page_content for doc in docs]
     metadata = [dict(doc.metadata or {}) for doc in docs]
     return contents, metadata
@@ -151,7 +152,8 @@ def search_regulations(
 
     store = get_vector_store(category)
     search_query = f"{query} {year}" if year is not None else query
-    vector_docs = store.similarity_search(search_query, k=retrieval_k * 2)
+    with embedding_inference():
+        vector_docs = store.similarity_search(search_query, k=retrieval_k * 2)
 
     preferred = [
         doc
