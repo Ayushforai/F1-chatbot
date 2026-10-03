@@ -1,6 +1,262 @@
 # Racecoe
 
-A hybrid Formula 1 assistant (formerly the F1 Pit Wall chatbot) that routes questions to the right data source: live telemetry (OpenF1), structured historical CSV lookups, or RAG over FIA regulation PDFs and historical race documents.
+## Description
+
+Racecoe is a hybrid Formula 1 assistant (formerly the F1 Pit Wall chatbot). It routes each question to the best data source: **live telemetry and lap data** (OpenF1), **structured historical CSVs** (Ergast-style race archive), or **RAG** over FIA regulation PDFs and historical race documents. A React web UI and FastAPI backend share the same Python pipeline as the CLI.
+
+**Tagline:** Hybrid Formula 1 chatbot — live telemetry, race history, and FIA regulations.
+
+**Live site:** [https://racecoe.onrender.com](https://racecoe.onrender.com) (Docker on Render; Gemini + OpenF1 in production).
+
+---
+
+## Technologies used
+
+| Layer | Stack |
+|-------|--------|
+| **Backend** | Python 3.11, FastAPI, Uvicorn |
+| **Chat pipeline** | Custom router + `app.py` orchestration (clarifications, memory, citations) |
+| **LLM** | [Ollama](https://ollama.com/) locally (`qwen2.5:7b-instruct-q8_0`); **Gemini 3.8 Flash** in production via `utils/llm.py` (Groq / OpenAI / Grok optional) |
+| **Embeddings & RAG** | LangChain, `langchain-huggingface`, **FAISS** (`faiss-cpu`), **BAAI/bge-base-en-v1.5**, PyTorch (CPU in Docker) |
+| **PDF / indexes** | `pypdf`, `pdf_processor.py`, `historical_processor.py` |
+| **Data** | **pandas** (historical CSVs), **OpenF1** REST API, Frankfurter FX API, optional **Kaggle** download (`kagglehub`) |
+| **Frontend** | **React 18**, **Vite 6**, plain CSS (F1-themed tokens), Google Fonts (Oswald, Titillium Web, Merriweather) |
+| **Deploy** | **Docker**, `docker-compose.yml`, **Render** (`render.yaml`), health checks + smoke script |
+| **Testing** | `unittest` (235+ cases), Node test runner for answer formatting, `scripts/smoke_deploy.py` |
+
+**Environment & secrets:** `.env` — `HF_TOKEN`, `GEMINI_API_KEY` (or other `LLM_*` keys), optional `RAG_WARMUP_CATEGORIES`, `F1_SKIP_WARMUP`, `CORS_ORIGINS`.
+
+---
+
+## Features
+
+### Routing & clarification
+- **Intent routing** — classifies queries into general, sporting, technical, financial, operational, quantitative, historical, or ambiguous
+- **Ambiguous query guard** — vague questions get a capabilities menu instead of a wrong guess
+- **Year clarification** — race, lap, and driver-team lookups ask for a season before defaulting to 2026
+- **Venue clarification** — multi-GP countries (e.g. Italy, USA) prompt for the specific circuit (Monza vs Imola, Austin vs Miami vs Las Vegas)
+- **Driver clarification** — lap and telemetry queries require a named driver; no silent default to Hamilton
+- **Driver number lookup** — names, surnames, and `#NN` tokens map to car numbers via `data/driver_numbers.json` (OpenF1 grid). `F1DriversDataset.csv` helps recognize 868 canonical driver names in query text before number lookup.
+
+### Live & quantitative data
+- **OpenF1 integration** — fastest lap, specific-lap lookups, and live telemetry when a session is actually live
+- **Session-aware fastest laps** — practice (FP1/FP2/FP3), qualifying, sprint, and race fastest-lap queries hit OpenF1 directly; “latest fp2 session” resolves via `session_key=latest` without needing a Grand Prix in the question (no LLM round-trip)
+- **Lap time formatting** — API responses use F1-style `M:SS.mmm` display
+- **Top-speed lookup** — highest speed-trap readings via OpenF1 (2021+) and fastest-lap speeds from CSV; handles all-time and GP-specific queries
+- **OpenF1 timeouts** — HTTP calls use a 15s timeout so a stuck API cannot hang chat indefinitely
+
+### Historical data (CSV + RAG)
+- **Full race classifications** — pre-2026 result queries use CSV directly: every finisher, DNFs, and fastest laps (not just the top 10)
+- **Driver-team lookups** — career questions like “Which team did Hamilton drive for in 2012?” resolve from `results.csv` (supports surname or full name, e.g. “Lance Stroll”)
+- **Historical RAG** — FAISS search over processed race documents for broader historical questions
+- **Venue-aware CSV matching** — country/circuit synonyms map correctly to the right Grand Prix
+
+### Regulations
+- **Regulation RAG** — FAISS vector search over FIA regulation PDFs (general/Section A, sporting, technical, financial, operational)
+- **Article-aware indexing** — PDFs split by `ARTICLE` headings with section/article metadata; `articles.json` enables exact Article lookups
+- **Hybrid retrieval** — article/section refs hit structured lookup first; broad questions retrieve more chunks
+- **Regulation year default** — yearless regulation queries default to the current season, with an option to ask about another year
+
+### Conversation & display
+- **Conversation memory** — last 5 turns stored with answers; follow-ups like “Who finished second?” or “and in 2023?” reuse prior context
+- **Fresh re-fetch** — when memory is insufficient or the user asks to verify, the bot re-queries CSV, API, or RAG
+- **Currency display** — financial amounts shown in USD, INR, and GBP (penalties: USD + INR only), using live rates from the Frankfurter API with cached fallback
+- **Source citations** — every answer ends with where the data came from (CSV tables, OpenF1 API, regulation PDF chunk, historical vector doc, or prior turn)
+- **In-memory RAG cache** — embedding model weights and FAISS indexes stay loaded for the whole session; only RAG queries use the model, CSV/API queries do not
+
+---
+
+## What you can do
+
+### In the web app
+- **Chat** — ask natural-language F1 questions; get markdown answers with source footers
+- **Schedule** — browse season calendar (OpenF1 meetings + race weekend dates)
+- **About** — capability overview (live data, archive, regulations, clarifications)
+- **Race bar** — step through rounds; jump to schedule from the current GP chip
+- **New session** — reset conversation history (nav icon or **Reset** in chat)
+
+### Example questions
+
+| You ask | What happens |
+|---------|----------------|
+| Cost cap / sporting / technical rules | Regulation RAG + optional year follow-up |
+| Full Monaco 2021 results | CSV classification; optional Qualifying/Sprint follow-up |
+| Hamilton’s team in 2012 | CSV driver–team lookup |
+| Lap 12 at Monza 2024 for a driver | OpenF1 lap packet |
+| Fastest lap in latest **FP2** for Hamilton | OpenF1 session + laps (direct API path) |
+| Live telemetry for `#1` | OpenF1 only when a session is in the live window |
+| “Who finished second?” after a race answer | Conversation memory or fresh CSV re-fetch |
+| Vague “tell me about F1” | Capabilities menu instead of a random guess |
+
+### CLI
+- Same pipeline as the API: `python app.py` in a real terminal (readline line editing when available).
+
+---
+
+## How to run the project
+
+### Requirements
+
+| | |
+|--|--|
+| **Python** | 3.11+ |
+| **Node.js** | 18+ (frontend build / dev) |
+| **Local LLM** | Ollama + `qwen2.5:7b-instruct-q8_0` (optional if using Gemini locally) |
+| **Secrets** | `HF_TOKEN` (embeddings); `GEMINI_API_KEY` for cloud LLM |
+| **Data in repo** | Historical CSVs, FAISS indexes under `vector_store/`, FIA PDFs under `data/` |
+
+### Quick start (local)
+
+```bash
+python3 -m venv botenv
+source botenv/bin/activate          # Windows: botenv\Scripts\activate
+pip install -r requirements.txt
+pip install torch                   # if not already installed (see requirements.txt note)
+
+cp .env.example .env                # set HF_TOKEN=... and optionally LLM keys
+
+ollama pull qwen2.5:7b-instruct-q8_0   # local dev only
+
+# Indexes & data (if not already built)
+python pdf_processor.py
+python setup_historical_data.py
+python historical_processor.py
+python setup_driver_numbers.py
+
+# API + built UI
+cd frontend && npm install && npm run build && cd ..
+python server.py                    # http://127.0.0.1:5001
+```
+
+**Frontend dev (hot reload):** `cd frontend && npm run dev` — proxies `/api` to port **5001**.
+
+**CLI only:** `python app.py` from a **Terminal** tab (not the IDE Debug Console) so backspace/arrows work.
+
+### Production-shaped run (Docker)
+
+```bash
+cp .env.example .env                # GEMINI_API_KEY, HF_TOKEN
+docker compose up --build           # http://127.0.0.1:8000 — check /api/health
+```
+
+Deploy to **Render** with `render.yaml`; set secrets in the dashboard. Smoke test:
+
+```bash
+python scripts/smoke_deploy.py --http --base-url https://YOUR-URL
+```
+
+See [Models & deployment](#models--deployment-local-vs-production), [Setup (local)](#setup-local), and [RAG performance & deployment](#rag-performance--deployment) for env vars, warmup, and free-tier memory notes.
+
+---
+
+## Live demo
+
+<!-- Replace the placeholder below when your video is ready -->
+
+**Video:** _Coming soon — add a link or embed here (e.g. YouTube, Loom, or `./docs/demo.mp4`)._
+
+**Try it now:** [racecoe.onrender.com](https://racecoe.onrender.com)
+
+Suggested demo flow for recording:
+1. Regulation question (cost cap / sporting rule) with citation  
+2. Full race classification (e.g. Monaco 2021) + follow-up “who was third?”  
+3. Latest FP2 fastest lap for a named driver  
+4. Schedule tab + intro splash (branded UI)
+
+---
+
+## Keyboard shortcuts
+
+| Context | Action | Shortcut |
+|---------|--------|----------|
+| **Web chat** | Send message | **Enter** |
+| **Web chat** | New line in input | _Not supported_ (single-line field; use **Enter** to send) |
+| **CLI** (`app.py`) | Line editing | **Backspace**, **←/→**, **Home/End** via readline when stdin is a TTY |
+| **CLI** | Exit | `exit` or `quit` |
+
+There are no global web hotkeys beyond clicking **Chat / Schedule / About**, suggestion chips, and **Reset**. Use the nav **new session** control to clear server-side history.
+
+---
+
+## The process
+
+End-to-end flow for one user message:
+
+```mermaid
+flowchart LR
+  UI[React UI / CLI] --> API[FastAPI server.py]
+  API --> PQ[process_query app.py]
+  PQ --> R{Router + handlers}
+  R --> CSV[Historical CSV]
+  R --> OF1[OpenF1 API]
+  R --> RAG[FAISS + embeddings]
+  R --> LLM[Gemini / Ollama]
+  CSV --> CTX[Context packet]
+  OF1 --> CTX
+  RAG --> CTX
+  CTX --> LLM
+  LLM --> OUT[Answer + citation]
+```
+
+1. **Ingress** — `POST /api/chat` with `session_id` + message; per-session lock keeps history consistent; different users run in parallel.
+2. **Pre-routing** — Specialized handlers (race results, driver teams, session fastest lap, top speed, lap deltas, clarifications) run before generic LLM routing.
+3. **Routing** — LLM classifies intent (regulation category, historical, quantitative, ambiguous).
+4. **Retrieval** — CSV SQL-like pandas lookups, OpenF1 HTTP, or hybrid regulation search (exact article + vector).
+5. **Generation** — LLM answers **only** from the context packet; citations appended from `utils/citations.py`.
+6. **Memory** — Last 5 turns stored per session; follow-ups can reuse answers or trigger re-fetch.
+
+**Boot:** optional embedding warmup (`initialize_pipeline` / `F1_SKIP_WARMUP` on small hosts).
+
+---
+
+## What I learned
+
+Building Racecoe surfaced practical lessons beyond “call an LLM”:
+
+- **Hybrid beats pure RAG** for F1 — structured CSV and OpenF1 give exact grids and lap times; RAG is for regulations and fuzzy history. Wrong routing was as harmful as wrong retrieval (see `ISSUES.md` I01–I07).
+- **Clarify before defaulting** — silent defaults (year 2026, driver #44) produced confident wrong answers; explicit prompts improved trust more than smarter prompts alone.
+- **Live vs archive** — OpenF1’s live window is narrow; pretending archive car data is “live” fails user expectations (I03).
+- **Memory needs the answer, not just the category** — follow-ups only work when prior **answers** are in context or re-fetched from CSV/API.
+- **Deploy constraints shape architecture** — 512MB Render forced lazy embedding load, CPU torch, and skip-warmup; concurrency needed per-session locks, not one global chat mutex.
+- **Evaluation without RAGAS** — issue IDs + 235 unit tests + deploy smoke caught regressions better than a single accuracy score for this scope.
+
+---
+
+## Overall growth & roadmap
+
+Planned and natural extensions:
+
+| Area | Direction |
+|------|-----------|
+| **Teams & grids** | Full constructor line-ups per season (drivers, numbers, team principals) from CSV + OpenF1, not only single driver–team lookups |
+| **Standings & points** | Championship tables, sprint points, and race-by-race progression from existing CSV + API fields |
+| **UI** | Streaming answers, richer session picker (FP1/FP2/Quali/Race), standings pages wired to real data (nav placeholders today) |
+| **Backend** | Session store (Redis) for multi-instance deploy; rate limiting; optional external embedding API to drop in-process torch |
+| **RAG** | Close **B02** (empty chunks); stronger held-out eval (RAGAS/faithfulness) when the backlog allows |
+| **Data** | Post-2026 results via OpenF1-first path; more regulation seasons in `vector_store/` |
+
+---
+
+## How Racecoe can be improved
+
+**Product**
+- Wire **Results / Standings / Drivers / Teams** nav to live data instead of routing to chat only.
+- Session picker UI for “latest FP2” vs named GP + session type.
+- Clearer loading states when Gemini or OpenF1 is slow (timeouts already prevent infinite spinners on API).
+
+**Quality**
+- Reduce **LLM calls per turn** (keyword fast-path routing for obvious CSV/OpenF1 queries).
+- Fix remaining **B02** RAG edge case; add periodic RAGAS sampling on regulation Q&A.
+- Expand **multi-language** or **voice** only if scope grows — not required for core F1 data accuracy.
+
+**Ops**
+- **Render Standard (2GB)** + `F1_SKIP_WARMUP=0` for faster first RAG answer; keep-alive cron on free tier.
+- Persist **HF model cache** in Docker volume to shorten cold starts.
+- **Horizontal scale** needs shared session storage — in-memory `_sessions` is fine for demos, not for high traffic.
+
+**Contributions welcome:** tests in `tests/`, issues in `ISSUES.md`, small focused PRs on router, `f1_api.py`, or UI.
+
+---
 
 ## Models & deployment (local vs production)
 
@@ -41,42 +297,6 @@ export GEMINI_THINKING_LEVEL=LOW           # LOW|MEDIUM|HIGH for 3.8
 ```
 
 Embeddings stay on **Hugging Face** (`BAAI/bge-base-en-v1.5`) in both environments (set `HF_TOKEN`).
-
-## Features
-
-### Routing & clarification
-- **Intent routing** — classifies queries into general, sporting, technical, financial, operational, quantitative, historical, or ambiguous
-- **Ambiguous query guard** — vague questions get a capabilities menu instead of a wrong guess
-- **Year clarification** — race, lap, and driver-team lookups ask for a season before defaulting to 2026
-- **Venue clarification** — multi-GP countries (e.g. Italy, USA) prompt for the specific circuit (Monza vs Imola, Austin vs Miami vs Las Vegas)
-- **Driver clarification** — lap and telemetry queries require a named driver; no silent default to Hamilton
-- **Driver number lookup** — names, surnames, and `#NN` tokens map to car numbers via `data/driver_numbers.json` (OpenF1 grid). `F1DriversDataset.csv` helps recognize 868 canonical driver names in query text before number lookup.
-
-### Live & quantitative data
-- **OpenF1 integration** — fastest lap, specific-lap lookups, and live telemetry when a session is actually live
-- **Session-aware fastest laps** — practice (FP1/FP2/FP3), qualifying, sprint, and race fastest-lap queries hit OpenF1 directly; “latest fp2 session” resolves via `session_key=latest` without needing a Grand Prix in the question (no LLM round-trip)
-- **Lap time formatting** — API responses use F1-style `M:SS.mmm` display
-- **Top-speed lookup** — highest speed-trap readings via OpenF1 (2021+) and fastest-lap speeds from CSV; handles all-time and GP-specific queries
-- **OpenF1 timeouts** — HTTP calls use a 15s timeout so a stuck API cannot hang chat indefinitely
-
-### Historical data (CSV + RAG)
-- **Full race classifications** — pre-2026 result queries use CSV directly: every finisher, DNFs, and fastest laps (not just the top 10)
-- **Driver-team lookups** — career questions like “Which team did Hamilton drive for in 2012?” resolve from `results.csv` (supports surname or full name, e.g. “Lance Stroll”)
-- **Historical RAG** — FAISS search over processed race documents for broader historical questions
-- **Venue-aware CSV matching** — country/circuit synonyms map correctly to the right Grand Prix
-
-### Regulations
-- **Regulation RAG** — FAISS vector search over FIA regulation PDFs (general/Section A, sporting, technical, financial, operational)
-- **Article-aware indexing** — PDFs split by `ARTICLE` headings with section/article metadata; `articles.json` enables exact Article lookups
-- **Hybrid retrieval** — article/section refs hit structured lookup first; broad questions retrieve more chunks
-- **Regulation year default** — yearless regulation queries default to the current season, with an option to ask about another year
-
-### Conversation & display
-- **Conversation memory** — last 5 turns stored with answers; follow-ups like “Who finished second?” or “and in 2023?” reuse prior context
-- **Fresh re-fetch** — when memory is insufficient or the user asks to verify, the bot re-queries CSV, API, or RAG
-- **Currency display** — financial amounts shown in USD, INR, and GBP (penalties: USD + INR only), using live rates from the Frankfurter API with cached fallback
-- **Source citations** — every answer ends with where the data came from (CSV tables, OpenF1 API, regulation PDF chunk, historical vector doc, or prior turn)
-- **In-memory RAG cache** — embedding model weights and FAISS indexes stay loaded for the whole session; only RAG queries use the model, CSV/API queries do not
 
 ## Requirements
 
