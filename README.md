@@ -68,7 +68,7 @@ Racecoe is a hybrid Formula 1 assistant (formerly the F1 Pit Wall chatbot). It r
 
 ## What you can do 👥
 
-### In the web app
+### In the web app 🌐
 - **Chat** — ask natural-language F1 questions; get markdown answers with source footers
 - **Schedule** — browse season calendar (OpenF1 meetings + race weekend dates)
 - **About** — capability overview (live data, archive, regulations, clarifications)
@@ -95,7 +95,7 @@ Racecoe is a hybrid Formula 1 assistant (formerly the F1 Pit Wall chatbot). It r
 
 ## How to run the project 📲
 
-### Requirements
+### Requirements 📦
 
 | | |
 |--|--|
