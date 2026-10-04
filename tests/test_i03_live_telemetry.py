@@ -17,6 +17,20 @@ def _response(payload, status=200):
     return mock
 
 
+def _call_uses_latest_session(url: str, kwargs: dict) -> bool:
+    if "/sessions" not in url:
+        return False
+    params = kwargs.get("params") or {}
+    return params.get("session_key") == "latest"
+
+
+def _call_uses_latest_car_data(url: str, kwargs: dict) -> bool:
+    if "/car_data" not in url:
+        return False
+    params = kwargs.get("params") or {}
+    return params.get("session_key") == "latest"
+
+
 PAST_SESSION = {
     "session_key": 9565,
     "location": "Silverstone",
@@ -42,11 +56,22 @@ class TestI03LiveTelemetry(unittest.TestCase):
     def test_session_is_not_live_for_archive_session(self):
         self.assertFalse(session_is_live(PAST_SESSION, now=NOW_OFF_WEEKEND))
 
+    def test_race_stays_live_past_scheduled_end_within_four_hours(self):
+        bahrain_race = {
+            "session_key": 11731,
+            "session_type": "Race",
+            "session_name": "Race",
+            "date_start": "2026-10-04T07:00:00+00:00",
+            "date_end": "2026-10-04T09:00:00+00:00",
+        }
+        after_scheduled_end = datetime(2026, 10, 4, 9, 45, tzinfo=timezone.utc)
+        self.assertTrue(session_is_live(bahrain_race, now=after_scheduled_end))
+
     def test_off_weekend_returns_simple_error_and_does_not_hit_archive(self):
-        requested_urls = []
+        calls: list[tuple[str, dict]] = []
 
         def fake_get(url, *args, **kwargs):
-            requested_urls.append(url)
+            calls.append((url, kwargs))
             if "/sessions" in url:
                 return _response([PAST_SESSION])
             raise AssertionError(f"Unexpected request: {url}")
@@ -55,16 +80,16 @@ class TestI03LiveTelemetry(unittest.TestCase):
             result = get_driver_telemetry(1, now=NOW_OFF_WEEKEND)
 
         self.assertEqual(result, LIVE_DATA_UNAVAILABLE_MESSAGE)
-        self.assertTrue(any("session_key=latest" in url for url in requested_urls))
-        self.assertFalse(any("Silverstone" in url for url in requested_urls))
-        self.assertFalse(any("9565" in url for url in requested_urls))
-        self.assertFalse(any("/car_data" in url for url in requested_urls))
+        self.assertTrue(any(_call_uses_latest_session(url, kw) for url, kw in calls))
+        self.assertFalse(any("Silverstone" in url for url, _ in calls))
+        self.assertFalse(any("9565" in url for url, _ in calls))
+        self.assertFalse(any("/car_data" in url for url, _ in calls))
 
     def test_live_session_fetches_openf1_car_data_with_latest_key(self):
-        requested_urls = []
+        calls: list[tuple[str, dict]] = []
 
         def fake_get(url, *args, **kwargs):
-            requested_urls.append(url)
+            calls.append((url, kwargs))
             if "/sessions" in url:
                 return _response([LIVE_SESSION])
             if "/car_data" in url:
@@ -76,9 +101,9 @@ class TestI03LiveTelemetry(unittest.TestCase):
 
         self.assertEqual(result["speed"], 312)
         self.assertEqual(result["driver_number"], 1)
-        self.assertTrue(any("car_data" in url and "session_key=latest" in url for url in requested_urls))
-        self.assertFalse(any("Silverstone" in url for url in requested_urls))
-        self.assertFalse(any("9565" in url for url in requested_urls))
+        self.assertTrue(any(_call_uses_latest_car_data(url, kw) for url, kw in calls))
+        self.assertFalse(any("Silverstone" in url for url, _ in calls))
+        self.assertFalse(any("9565" in url for url, _ in calls))
 
     def test_live_session_with_empty_or_forbidden_car_data_returns_error(self):
         def fake_get(url, *args, **kwargs):

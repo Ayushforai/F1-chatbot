@@ -36,6 +36,7 @@ from utils.f1_api import (
     parse_openf1_session_name,
     query_asks_fastest_lap,
     query_asks_latest_session,
+    query_asks_session_fastest_lap,
 )
 from utils.citations import (
     SourceCitation,
@@ -1481,6 +1482,29 @@ def resolve_quantitative_query(params: dict, user_query: str = "") -> dict:
             ),
         }
 
+    if (
+        query_asks_session_fastest_lap(user_query)
+        and _has_driver(driver)
+        and not country
+        and q_type != "fastest_lap"
+    ):
+        label = session_name or "latest session"
+        print(f" [OpenF1] Session fastest lap (not live car telemetry): {label}...")
+        session = fetch_latest_session(session_name)
+        if isinstance(session, str):
+            return {"kind": "error", "message": session}
+        telemetry_data = get_fastest_lap_for_session(session, driver_number=driver)
+        if isinstance(telemetry_data, str):
+            return {"kind": "error", "message": telemetry_data}
+        return {
+            "kind": "context",
+            "context": f"OpenF1 Fastest Lap Record: {telemetry_data}",
+            "source": openf1_api(
+                endpoint=f"fastest lap ({session.get('session_name')})",
+                detail=telemetry_data.get("session_label", label),
+            ),
+        }
+
     if q_type == "fastest_lap" and country and session_name:
         print(f" [OpenF1] Scanning {year} {country} {session_name} for the fastest lap...")
         session = fetch_session(year, country, session_name=session_name, location=location)
@@ -1935,11 +1959,7 @@ def _lookup_top_speed(
 
 
 def _is_session_fastest_lap_query(user_query: str) -> bool:
-    if not query_asks_fastest_lap(user_query):
-        return False
-    if parse_openf1_session_name(user_query):
-        return True
-    return query_asks_latest_session(user_query)
+    return query_asks_session_fastest_lap(user_query)
 
 
 def _lookup_session_fastest_lap(user_query: str, *, driver_number: int | None) -> tuple[str, SourceCitation | None]:

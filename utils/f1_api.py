@@ -47,9 +47,24 @@ def session_is_live(session: dict, now: datetime | None = None) -> bool:
     now = now or datetime.now(timezone.utc)
     start = _parse_iso(session.get("date_start"))
     end = _parse_iso(session.get("date_end"))
-    if start is None or end is None:
+    if start is None:
         return False
-    return (start - LIVE_WINDOW_PADDING) <= now <= (end + LIVE_WINDOW_PADDING)
+
+    session_label = f"{session.get('session_type') or ''} {session.get('session_name') or ''}".lower()
+    is_race = "race" in session_label and "qual" not in session_label
+
+    if end is None:
+        if now < start - LIVE_WINDOW_PADDING:
+            return False
+        max_run = timedelta(hours=4 if is_race else 2)
+        return now <= start + max_run
+
+    live_end = end + LIVE_WINDOW_PADDING
+    if is_race:
+        # Scheduled end times are often shorter than real race length (delays, red flags).
+        live_end = max(live_end, start + timedelta(hours=4))
+
+    return (start - LIVE_WINDOW_PADDING) <= now <= live_end
 
 
 def get_driver_telemetry(driver_number: int, now: datetime | None = None):
@@ -67,7 +82,7 @@ def get_driver_telemetry(driver_number: int, now: datetime | None = None):
         if not sessions:
             return LIVE_DATA_UNAVAILABLE_MESSAGE
 
-        latest_session = sessions[-1] if isinstance(sessions, list) else sessions
+        latest_session = sessions[0] if isinstance(sessions, list) else sessions
         if not session_is_live(latest_session, now=now):
             return LIVE_DATA_UNAVAILABLE_MESSAGE
 
@@ -126,7 +141,7 @@ def parse_openf1_session_name(query: str) -> str | None:
 
 def query_asks_latest_session(query: str) -> bool:
     q = query.lower()
-    return any(
+    if any(
         phrase in q
         for phrase in (
             "latest",
@@ -140,8 +155,26 @@ def query_asks_latest_session(query: str) -> bool:
             "this race",
             "latest race",
             "most recent race",
+            "current fastest",
+            "fastest lap so far",
+            "fastest lap right now",
         )
-    )
+    ):
+        return True
+    if re.search(r"\b(so far|right now|at the moment)\b", q) and query_asks_fastest_lap(q):
+        return True
+    if re.search(r"\bcurrent\b", q) and query_asks_fastest_lap(q):
+        return True
+    return False
+
+
+def query_asks_session_fastest_lap(query: str) -> bool:
+    """Fastest lap for the latest or in-progress session (not a named historical GP)."""
+    if not query_asks_fastest_lap(query):
+        return False
+    if parse_openf1_session_name(query):
+        return True
+    return query_asks_latest_session(query)
 
 
 def query_asks_fastest_lap(query: str) -> bool:
