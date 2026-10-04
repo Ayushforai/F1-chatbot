@@ -111,10 +111,27 @@ export async function resetChat() {
 }
 
 export async function fetchCalendar(year) {
-  const query = year ? `?year=${year}` : "";
+  const query = year != null ? `?year=${year}` : "";
   const response = await fetch(`/api/calendar${query}`);
   if (!response.ok) {
     throw new Error(await parseError(response));
   }
   return response.json();
+}
+
+/** Prefer a season that actually has races (CSV or OpenF1). */
+export async function fetchCalendarWithFallback(year) {
+  const first = await fetchCalendar(year);
+  if (first.races?.length) return first;
+  // Only auto-switch seasons on the default load (race bar / first schedule open).
+  if (year != null) return first;
+
+  const tried = new Set([first.year]);
+  for (const candidate of first.years || []) {
+    if (tried.has(candidate)) continue;
+    tried.add(candidate);
+    const next = await fetchCalendar(candidate);
+    if (next.races?.length) return next;
+  }
+  return first;
 }

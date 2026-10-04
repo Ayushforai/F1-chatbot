@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import csv
+import difflib
 import re
 from functools import lru_cache
 from pathlib import Path
@@ -145,7 +146,44 @@ def match_driver_in_text(text: str, *, year: int | None = None) -> dict | None:
             for index in indexes:
                 candidates.append((index, alias, source))
 
+    if not candidates:
+        candidates.extend(_fuzzy_token_candidates(haystack, rows))
+
     return _best_match(candidates, year=year)
+
+
+def _fuzzy_token_candidates(
+    haystack: str,
+    rows: list[dict],
+) -> list[tuple[int, str, str]]:
+    """Match close misspellings (e.g. hamiliton → hamilton) against catalog surnames."""
+    tokens = re.findall(r"[a-z]{5,}", haystack)
+    if not tokens:
+        return []
+
+    surname_aliases: list[str] = []
+    surname_to_indexes: dict[str, list[int]] = {}
+    for index, row in enumerate(rows):
+        surname = _normalize(row.get("surname") or "")
+        if len(surname) < 5:
+            continue
+        if surname not in surname_to_indexes:
+            surname_aliases.append(surname)
+            surname_to_indexes[surname] = []
+        surname_to_indexes[surname].append(index)
+
+    candidates: list[tuple[int, str, str]] = []
+    for token in tokens:
+        if token in surname_to_indexes:
+            continue
+        close = difflib.get_close_matches(token, surname_aliases, n=1, cutoff=0.86)
+        if not close:
+            continue
+        alias = close[0]
+        for index in surname_to_indexes[alias]:
+            candidates.append((index, alias, "fuzzy"))
+
+    return candidates
 
 
 def match_driver_ref(ref: str, *, year: int | None = None) -> dict | None:

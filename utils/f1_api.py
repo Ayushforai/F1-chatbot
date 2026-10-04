@@ -136,6 +136,10 @@ def query_asks_latest_session(query: str) -> bool:
             "recent session",
             "last fp",
             "latest fp",
+            "current race",
+            "this race",
+            "latest race",
+            "most recent race",
         )
     )
 

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { fetchCalendar } from "../api.js";
+import { fetchCalendarWithFallback } from "../api.js";
 import { CountryFlag } from "../flags.jsx";
 
 function formatRaceDate(iso) {
@@ -33,7 +33,7 @@ export default function Calendar({ onAsk }) {
       setLoading(true);
       setError("");
       try {
-        const data = await fetchCalendar(year);
+        const data = await fetchCalendarWithFallback(year);
         if (cancelled) return;
         setYears(data.years || []);
         setRaces(data.races || []);
@@ -77,7 +77,10 @@ export default function Calendar({ onAsk }) {
       {loading ? <p className="calendar-status">Loading calendar…</p> : null}
       {error ? <p className="calendar-status error">{error}</p> : null}
       {!loading && !error && races.length === 0 ? (
-        <p className="calendar-status">No races published for this season yet.</p>
+        <p className="calendar-status">
+          No races loaded for {year ?? "this season"}. Live OpenF1 data may be unavailable — try
+          another season or refresh in a minute.
+        </p>
       ) : null}
 
       <ol className="calendar-list">

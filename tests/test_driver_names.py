@@ -32,6 +32,14 @@ class TestDriverNamesCatalog(unittest.TestCase):
         self.assertIsNotNone(match)
         self.assertEqual(match["full_name"], "Nyck de Vries")
 
+    def test_fuzzy_hamilton_typo(self):
+        match = match_driver_in_text(
+            "what is hamiliton's fastest lap in the current race",
+            year=2026,
+        )
+        self.assertIsNotNone(match)
+        self.assertEqual(match["surname"], "Hamilton")
+
 
 @unittest.skipUnless(CATALOG_PATH.is_file(), "F1DriversDataset.csv missing")
 class TestDriverNamesWithNumbers(unittest.TestCase):

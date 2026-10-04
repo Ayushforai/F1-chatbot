@@ -10,6 +10,8 @@
   --f1-text: #ffffff;
   --nav-height: 56px;
   --race-height: 40px;
+  --composer-min-height: 52px;
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
   --font-ui: "Titillium Web", "Segoe UI", sans-serif;
   --font-chat: Georgia, "Times New Roman", serif;
   --font-display: "Oswald", "Titillium Web", sans-serif;
@@ -31,6 +33,8 @@ body,
   margin: 0;
   min-height: 100%;
   height: 100%;
+  min-height: 100dvh;
+  height: 100dvh;
 }
 
 body {
@@ -62,6 +66,8 @@ a {
 .app {
   height: 100%;
   min-height: 100%;
+  height: 100dvh;
+  min-height: 100dvh;
   display: flex;
   flex-direction: column;
   background:
@@ -70,10 +76,11 @@ a {
 }
 
 .main-stage {
-  flex: 1;
+  flex: 1 1 auto;
   display: flex;
   flex-direction: column;
   min-height: 0;
+  overflow: hidden;
 }
 
 .stage-panel {
