@@ -56,6 +56,23 @@ class TestSessionNameParsing(unittest.TestCase):
 
 
 class TestSessionFastestLapHandler(unittest.TestCase):
+    def test_handle_current_race_fastest_lap_with_driver_typo(self):
+        history: list[dict] = []
+        query = "what is hamiliton's fastest lap in the current race"
+        race_session = dict(FP2_SESSION)
+        race_session["session_name"] = "Race"
+
+        with patch("app.fetch_latest_session", return_value=race_session), patch(
+            "app.get_fastest_lap_for_session",
+            return_value=dict(FASTEST_LAP_PACKET),
+        ), patch("app.route_query") as route_mock, patch("app.llm_generate") as llm_mock:
+            result = app.process_query(history, query)
+
+        route_mock.assert_not_called()
+        llm_mock.assert_not_called()
+        self.assertIn("1:23.939", result["body"])
+        self.assertEqual(result["category"], "quantitative")
+
     def test_handle_latest_fp2_without_llm_router(self):
         history: list[dict] = []
         query = "what was the fastest lap of lewis hamilton in the latest fp2 session?"

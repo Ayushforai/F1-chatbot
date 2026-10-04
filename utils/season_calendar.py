@@ -9,7 +9,10 @@ from utils.historical_db import circuits_df, csv_available, races_df
 
 
 def list_calendar_years() -> list[int]:
-    years = {datetime.now().year}
+    current = datetime.now().year
+    years = {current}
+    # CSV often lags the live season; keep recent years selectable for OpenF1 fallback.
+    years.update(range(current, current - 4, -1))
     if csv_available() and races_df is not None:
         years.update(int(year) for year in races_df["year"].dropna().unique())
     return sorted(years, reverse=True)

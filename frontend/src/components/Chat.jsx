@@ -178,7 +178,7 @@ export default function Chat({ pendingQuery, onPendingConsumed }) {
       </div>
 
       <form
-        className="composer"
+        className="composer chat-composer"
         onSubmit={(e) => {
           e.preventDefault();
           submit();

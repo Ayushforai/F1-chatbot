@@ -32,7 +32,9 @@ export default function App() {
   }
 
   return (
-    <div className={`app ${introDone ? "app-ready" : "app-waiting"}`}>
+    <div
+      className={`app ${introDone ? "app-ready" : "app-waiting"} app-tab-${tab}`}
+    >
       {introDone ? null : <Intro onDone={finishIntro} />}
       <TopNav tab={tab} onTab={setTab} onReset={handleReset} />
       <RaceBar onOpenSchedule={() => setTab("schedule")} onSeasonYear={setSeasonYear} />

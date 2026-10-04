@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { fetchCalendar } from "../api.js";
+import { fetchCalendarWithFallback } from "../api.js";
 import { formatWeekend, nextRoundIndex } from "../calendarUi.js";
 import { CountryFlag } from "../flags.jsx";
 import rcLogo from "../assets/rc-logo.png";
@@ -117,18 +117,7 @@ export function RaceBar({ onOpenSchedule, onSeasonYear }) {
   useEffect(() => {
     let cancelled = false;
     async function load() {
-      const first = await fetchCalendar();
-      let data = first;
-      if (!first.races?.length) {
-        for (const candidate of first.years || []) {
-          if (candidate === first.year) continue;
-          const next = await fetchCalendar(candidate);
-          if (next.races?.length) {
-            data = next;
-            break;
-          }
-        }
-      }
+      const data = await fetchCalendarWithFallback();
       if (cancelled || !data.races?.length) return;
       setRaces(data.races);
       setYear(data.year);
