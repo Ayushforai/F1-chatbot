@@ -2008,7 +2008,7 @@ def _handle_session_fastest_lap_query(conversation_history: list[dict], user_que
     if not _is_session_fastest_lap_query(user_query):
         return False
 
-    params = enrich_telemetry_params({}, user_query)
+    params = enrich_telemetry_params({}, user_query, year=current_regulations_year())
     driver = params.get("driver_number")
     if not _has_driver(driver):
         _respond_and_remember(

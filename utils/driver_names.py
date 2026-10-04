@@ -17,7 +17,9 @@ _SUFFIXES = {"jr", "jr.", "sr", "sr.", "ii", "iii"}
 def _normalize(text: str | None) -> str:
     if not text:
         return ""
-    cleaned = re.sub(r"[^a-z0-9\u00C0-\u024F\-'\s]", " ", str(text).lower())
+    cleaned = re.sub(r"['\u2019]s\b", " ", str(text))
+    cleaned = re.sub(r"[^a-z0-9\u00C0-\u024F\-'\s]", " ", cleaned.lower())
+    cleaned = re.sub(r"['\u2019]", " ", cleaned)
     return " ".join(cleaned.split())
 
 

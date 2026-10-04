@@ -35,6 +35,30 @@ class TestDriverNumbers(unittest.TestCase):
         enriched = enrich_telemetry_params(params, "live telemetry for Norris")
         self.assertEqual(enriched["driver_number"], 4)
 
+    def test_enrich_overrides_wrong_llm_car_number_from_query(self):
+        params = {
+            "query_type": "fastest_lap",
+            "driver_number": 1,
+            "driver_name": "Verstappen",
+            "year": 2026,
+        }
+        enriched = enrich_telemetry_params(
+            params,
+            "what is verstappen's fastest lap in the current race?",
+            year=2026,
+        )
+        self.assertEqual(enriched["driver_number"], 3)
+
+    def test_resolve_max_possessive_2026(self):
+        self.assertEqual(
+            resolve_driver_from_query("what is max's fastest lap in the current race?", year=2026),
+            3,
+        )
+
+    def test_resolve_surname_2026_grid(self):
+        self.assertEqual(resolve_driver_number("Verstappen", year=2026), 3)
+        self.assertEqual(resolve_driver_number("Norris", year=2026), 1)
+
     def test_enrich_fills_from_query_when_extractor_failed(self):
         params = {
             "query_type": "live_telemetry",
