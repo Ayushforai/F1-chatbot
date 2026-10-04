@@ -1,7 +1,10 @@
 import re
+import time
 from datetime import datetime, timedelta, timezone
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from utils.venues import MULTI_GP_COUNTRIES, multi_gp_clarification
 
@@ -14,6 +17,33 @@ LIVE_DATA_UNAVAILABLE_MESSAGE = (
     "This bot cannot print live F1 data as there is no live session going currently."
 )
 SESSION_NOT_HELD_MESSAGE = "The session is yet to be conducted."
+OPENF1_UNAVAILABLE_MESSAGE = (
+    "OpenF1 is temporarily unreachable (network or SSL error). Please try again in a moment."
+)
+
+_openf1_http: requests.Session | None = None
+
+
+def _friendly_openf1_error(exc: BaseException) -> str:
+    return OPENF1_UNAVAILABLE_MESSAGE
+
+
+def _openf1_http_session() -> requests.Session:
+    global _openf1_http
+    if _openf1_http is None:
+        session = requests.Session()
+        retries = Retry(
+            total=3,
+            connect=3,
+            read=3,
+            backoff_factor=0.6,
+            status_forcelist=(429, 500, 502, 503, 504),
+            allowed_methods=frozenset(["GET"]),
+            raise_on_status=False,
+        )
+        session.mount("https://", HTTPAdapter(max_retries=retries))
+        _openf1_http = session
+    return _openf1_http
 
 def format_lap_time(seconds):
     """Converts raw seconds into a standard F1 MM:SS.ms format."""
@@ -47,9 +77,24 @@ def session_is_live(session: dict, now: datetime | None = None) -> bool:
     now = now or datetime.now(timezone.utc)
     start = _parse_iso(session.get("date_start"))
     end = _parse_iso(session.get("date_end"))
-    if start is None or end is None:
+    if start is None:
         return False
-    return (start - LIVE_WINDOW_PADDING) <= now <= (end + LIVE_WINDOW_PADDING)
+
+    session_label = f"{session.get('session_type') or ''} {session.get('session_name') or ''}".lower()
+    is_race = "race" in session_label and "qual" not in session_label
+
+    if end is None:
+        if now < start - LIVE_WINDOW_PADDING:
+            return False
+        max_run = timedelta(hours=4 if is_race else 2)
+        return now <= start + max_run
+
+    live_end = end + LIVE_WINDOW_PADDING
+    if is_race:
+        # Scheduled end times are often shorter than real race length (delays, red flags).
+        live_end = max(live_end, start + timedelta(hours=4))
+
+    return (start - LIVE_WINDOW_PADDING) <= now <= live_end
 
 
 def get_driver_telemetry(driver_number: int, now: datetime | None = None):
@@ -67,7 +112,7 @@ def get_driver_telemetry(driver_number: int, now: datetime | None = None):
         if not sessions:
             return LIVE_DATA_UNAVAILABLE_MESSAGE
 
-        latest_session = sessions[-1] if isinstance(sessions, list) else sessions
+        latest_session = sessions[0] if isinstance(sessions, list) else sessions
         if not session_is_live(latest_session, now=now):
             return LIVE_DATA_UNAVAILABLE_MESSAGE
 
@@ -100,7 +145,17 @@ def _payload_list(payload) -> list:
 
 
 def _http_get(url: str, *, params: dict | None = None, timeout: int = REQUEST_TIMEOUT):
-    return requests.get(url, params=params, timeout=timeout)
+    session = _openf1_http_session()
+    last_exc: BaseException | None = None
+    for attempt in range(3):
+        try:
+            return session.get(url, params=params, timeout=timeout)
+        except requests.RequestException as exc:
+            last_exc = exc
+            if attempt < 2:
+                time.sleep(0.5 * (attempt + 1))
+    assert last_exc is not None
+    raise last_exc
 
 
 _SESSION_NAME_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
@@ -126,7 +181,7 @@ def parse_openf1_session_name(query: str) -> str | None:
 
 def query_asks_latest_session(query: str) -> bool:
     q = query.lower()
-    return any(
+    if any(
         phrase in q
         for phrase in (
             "latest",
@@ -140,8 +195,27 @@ def query_asks_latest_session(query: str) -> bool:
             "this race",
             "latest race",
             "most recent race",
+            "current fastest",
+            "fastest lap so far",
+            "fastest lap right now",
+            "current lap",
         )
-    )
+    ):
+        return True
+    if re.search(r"\b(so far|right now|at the moment)\b", q) and query_asks_fastest_lap(q):
+        return True
+    if re.search(r"\bcurrent\b", q) and query_asks_fastest_lap(q):
+        return True
+    return False
+
+
+def query_asks_session_fastest_lap(query: str) -> bool:
+    """Fastest lap for the latest or in-progress session (not a named historical GP)."""
+    if not query_asks_fastest_lap(query):
+        return False
+    if parse_openf1_session_name(query):
+        return True
+    return query_asks_latest_session(query)
 
 
 def query_asks_fastest_lap(query: str) -> bool:
@@ -201,7 +275,7 @@ def fetch_latest_session(
         return f"Database Error: Could not locate a {label} session."
 
     except requests.RequestException as exc:
-        return f"Historical Archive Error: {str(exc)}"
+        return _friendly_openf1_error(exc)
 
 
 def get_fastest_lap_for_session(
@@ -258,6 +332,8 @@ def get_fastest_lap_for_session(
             "average_speed": fastest_lap.get("st_speed"),
         }
     except Exception as exc:
+        if isinstance(exc, requests.RequestException):
+            return _friendly_openf1_error(exc)
         return f"Historical Archive Error: {str(exc)}"
 
 
@@ -520,7 +596,7 @@ def _fetch_sessions_for_year(
             params={"year": year, "session_name": session_name},
         )
     except requests.RequestException as e:
-        return f"Historical Archive Error: {str(e)}"
+        return _friendly_openf1_error(e)
 
     if res.status_code == 429:
         return "OpenF1 rate limit exceeded. Please try again in a minute."

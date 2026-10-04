@@ -15,6 +15,7 @@ from utils.f1_api import (
     parse_openf1_session_name,
     query_asks_fastest_lap,
     query_asks_latest_session,
+    query_asks_session_fastest_lap,
 )
 
 FP2_SESSION = {
@@ -54,11 +55,57 @@ class TestSessionNameParsing(unittest.TestCase):
         self.assertTrue(query_asks_fastest_lap(query))
         self.assertTrue(query_asks_latest_session(query))
 
+    def test_current_fastest_lap_is_session_lookup(self):
+        query = "what is Hamilton's current fastest lap?"
+        self.assertTrue(query_asks_session_fastest_lap(query))
+
 
 class TestSessionFastestLapHandler(unittest.TestCase):
     def test_handle_current_race_fastest_lap_with_driver_typo(self):
         history: list[dict] = []
         query = "what is hamiliton's fastest lap in the current race"
+        race_session = dict(FP2_SESSION)
+        race_session["session_name"] = "Race"
+
+        with patch("app.fetch_latest_session", return_value=race_session), patch(
+            "app.get_fastest_lap_for_session",
+            return_value=dict(FASTEST_LAP_PACKET),
+        ), patch("app.route_query") as route_mock, patch("app.llm_generate") as llm_mock:
+            result = app.process_query(history, query)
+
+        route_mock.assert_not_called()
+        llm_mock.assert_not_called()
+        self.assertIn("1:23.939", result["body"])
+        self.assertEqual(result["category"], "quantitative")
+
+    def test_handle_verstappen_current_race_fastest_lap(self):
+        history: list[dict] = []
+        query = "what is max's fastest lap in the current race?"
+        race_session = dict(FP2_SESSION)
+        race_session["session_name"] = "Race"
+        race_session["session_type"] = "Race"
+        packet = dict(FASTEST_LAP_PACKET)
+        packet["driver"] = "Max VERSTAPPEN"
+        packet["driver_number"] = 3
+
+        def fake_fastest(session, driver_number=None, now=None):
+            self.assertEqual(driver_number, 3)
+            return packet
+
+        with patch("app.fetch_latest_session", return_value=race_session), patch(
+            "app.get_fastest_lap_for_session",
+            side_effect=fake_fastest,
+        ), patch("app.route_query") as route_mock, patch("app.llm_generate") as llm_mock:
+            result = app.process_query(history, query)
+
+        route_mock.assert_not_called()
+        llm_mock.assert_not_called()
+        self.assertIn("Max VERSTAPPEN", result["body"])
+        self.assertEqual(result["category"], "quantitative")
+
+    def test_handle_current_fastest_lap_phrasing(self):
+        history: list[dict] = []
+        query = "what is Hamilton's current fastest lap?"
         race_session = dict(FP2_SESSION)
         race_session["session_name"] = "Race"
 

@@ -114,6 +114,14 @@ def resolve_driver_number(ref: str | int | None, *, year: int | None = None) -> 
     return None
 
 
+def _query_for_driver_match(query: str) -> str:
+    """Normalize possessives and punctuation so 'max's' and 'verstappen's' match aliases."""
+    text = query.lower()
+    text = re.sub(r"['\u2019]s\b", " ", text)
+    text = re.sub(r"['\u2019]", " ", text)
+    return text
+
+
 def resolve_driver_from_query(query: str, *, year: int | None = None) -> int | None:
     """Best-effort driver_number parse from free text (#44, 'Verstappen', etc.)."""
     if not query:
@@ -127,7 +135,7 @@ def resolve_driver_from_query(query: str, *, year: int | None = None) -> int | N
     if not rows:
         return None
 
-    q_lower = query.lower()
+    q_lower = _query_for_driver_match(query)
     matches: list[tuple[int, int]] = []
 
     for row in rows:
@@ -157,6 +165,8 @@ def enrich_telemetry_params(params: dict, query: str = "", *, year: int | None =
     enriched = dict(params)
     season_year = year if year is not None else enriched.get("year")
 
+    from_query = resolve_driver_from_query(query, year=season_year) if query else None
+
     identity = resolve_driver_identity(
         enriched.get("driver_name"),
         query=query,
@@ -165,7 +175,18 @@ def enrich_telemetry_params(params: dict, query: str = "", *, year: int | None =
     if identity and not enriched.get("driver_name"):
         enriched["driver_name"] = identity["surname"]
 
-    if enriched.get("driver_number") in (None, ""):
+    identity_number = None
+    if identity:
+        identity_number = resolve_driver_number(
+            identity.get("surname") or identity.get("full_name"),
+            year=season_year,
+        )
+
+    # Prefer the driver named in the user's message over LLM guesses (often wrong car #).
+    query_number = from_query if from_query is not None else identity_number
+    if query_number is not None:
+        enriched["driver_number"] = query_number
+    elif enriched.get("driver_number") in (None, ""):
         for candidate in (enriched.get("driver_name"), query):
             if not candidate:
                 continue
@@ -179,6 +200,11 @@ def enrich_telemetry_params(params: dict, query: str = "", *, year: int | None =
     if not enriched.get("driver_name") and enriched.get("driver_number") is not None:
         for row in _driver_rows(season_year):
             if row.get("driver_number") == enriched["driver_number"]:
+                enriched["driver_name"] = row.get("last_name") or row.get("full_name")
+                break
+    elif query_number is not None:
+        for row in _driver_rows(season_year):
+            if row.get("driver_number") == query_number:
                 enriched["driver_name"] = row.get("last_name") or row.get("full_name")
                 break
 
