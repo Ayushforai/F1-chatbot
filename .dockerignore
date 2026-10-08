@@ -19,7 +19,6 @@ data/archive/
 
 # Tests / docs not required in runtime image
 tests/
-scripts/
 *.md
 !README.md
 Racecoe FastAPi flow.png

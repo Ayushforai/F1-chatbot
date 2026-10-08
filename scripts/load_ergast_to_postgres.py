@@ -315,6 +315,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Load Ergast CSVs into PostgreSQL.")
     parser.add_argument("--data-dir", type=Path, default=DATA_DIR)
     parser.add_argument("--skip-schema", action="store_true")
+    parser.add_argument(
+        "--if-empty",
+        action="store_true",
+        help="Skip the load when f1.races already has rows.",
+    )
     args = parser.parse_args()
     if not database_url():
         print("DATABASE_URL is not set.")
@@ -322,7 +327,18 @@ def main() -> int:
     if not args.data_dir.is_dir():
         print(f"Data directory not found: {args.data_dir}")
         return 1
-    counts = load_archive(args.data_dir, apply=not args.skip_schema)
+    apply = not args.skip_schema
+    if args.if_empty:
+        if apply:
+            apply_schema(include_pgvector=True)
+            apply = False
+        with connect() as conn:
+            row = conn.execute("SELECT COUNT(*) AS n FROM f1.races").fetchone()
+            n = int(row["n"]) if row else 0
+        if n > 0:
+            print(f"Archive already loaded ({n} races); skipping.")
+            return 0
+    counts = load_archive(args.data_dir, apply=apply)
     print("Done.", counts)
     return 0
 
