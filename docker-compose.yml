@@ -2,8 +2,30 @@
 # Usage:
 #   cp .env.example .env   # set GEMINI_API_KEY + HF_TOKEN
 #   docker compose up --build
+#
+# Optional Postgres (feature/db):
+#   docker compose --profile db up --build
+#   python scripts/load_ergast_to_postgres.py
+# Then set HISTORICAL_BACKEND=postgres and SESSION_STORE=postgres.
 
 services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    profiles: ["db"]
+    environment:
+      POSTGRES_USER: racecoe
+      POSTGRES_PASSWORD: racecoe
+      POSTGRES_DB: racecoe
+    ports:
+      - "5432:5432"
+    volumes:
+      - racecoe_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U racecoe -d racecoe"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   racecoe:
     build: .
     ports:
@@ -19,6 +41,9 @@ services:
       HF_TOKEN: ${HF_TOKEN:-}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       RAG_WARMUP_CATEGORIES: ${RAG_WARMUP_CATEGORIES:-}
+      DATABASE_URL: ${DATABASE_URL:-}
+      HISTORICAL_BACKEND: ${HISTORICAL_BACKEND:-csv}
+      SESSION_STORE: ${SESSION_STORE:-memory}
     healthcheck:
       test:
         [
@@ -32,3 +57,6 @@ services:
       retries: 5
       start_period: 120s
     restart: unless-stopped
+
+volumes:
+  racecoe_pgdata:

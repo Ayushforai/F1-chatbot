@@ -35,3 +35,10 @@
         value: "1"
       - key: TOKENIZERS_PARALLELISM
         value: "false"
+      # Optional Postgres. Leave unset to keep CSV + in-memory sessions.
+      - key: DATABASE_URL
+        sync: false
+      - key: HISTORICAL_BACKEND
+        value: csv
+      - key: SESSION_STORE
+        value: memory

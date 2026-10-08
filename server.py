@@ -18,6 +18,8 @@ from pydantic import BaseModel
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
 from app import initialize_pipeline, process_query
+from utils import chat_store
+from utils.db import health_payload as database_health
 from utils.llm import active_model_label, describe_config, get_model_name
 from utils.season_calendar import get_season_calendar, list_calendar_years
 
@@ -26,19 +28,14 @@ DIST = ROOT / "frontend" / "dist"
 
 _ready = False
 _ready_error: str | None = None
-_sessions: dict[str, list[dict]] = {}
-_session_locks: dict[str, threading.Lock] = {}
-_tables_lock = threading.Lock()
+# Backed by chat_store (memory dict or Postgres). Tests still mutate these aliases.
+_sessions = chat_store.memory_sessions()
+_session_locks = chat_store.memory_locks()
 
 
 def _session_lock(session_id: str) -> threading.Lock:
     """Return a per-session lock (distinct sessions can chat in parallel)."""
-    with _tables_lock:
-        lock = _session_locks.get(session_id)
-        if lock is None:
-            lock = threading.Lock()
-            _session_locks[session_id] = lock
-        return lock
+    return chat_store.session_lock(session_id)
 
 
 def _cors_origins() -> list[str]:
@@ -121,9 +118,10 @@ app.add_middleware(
 
 def _run_query(session_id: str, message: str) -> dict | None:
     with _session_lock(session_id):
-        with _tables_lock:
-            history = _sessions.setdefault(session_id, [])
-        return process_query(history, message)
+        history = chat_store.load_history(session_id)
+        result = process_query(history, message)
+        chat_store.save_history(session_id, history)
+        return result
 
 
 def _chat_payload(result: dict | None, session_id: str) -> dict:
@@ -177,6 +175,7 @@ def health():
         "provider": cfg["provider"],
         "model_label": cfg["label"],
         "has_api_key": cfg["has_api_key"],
+        "database": database_health(),
     }
 
 
@@ -193,19 +192,7 @@ def calendar(year: int | None = Query(default=None)):
 @app.post("/api/reset")
 def reset(payload: ResetRequest | None = None):
     session_id = ((payload.session_id if payload else None) or "").strip()
-    if session_id:
-        with _session_lock(session_id):
-            with _tables_lock:
-                _sessions.pop(session_id, None)
-                _session_locks.pop(session_id, None)
-    else:
-        with _tables_lock:
-            session_ids = list(_session_locks.keys())
-        for sid in session_ids:
-            with _session_lock(sid):
-                with _tables_lock:
-                    _sessions.pop(sid, None)
-                    _session_locks.pop(sid, None)
+    chat_store.reset_session(session_id or None)
     return {"ok": True, "session_id": session_id or str(uuid.uuid4())}
 
 

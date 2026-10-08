@@ -19,7 +19,7 @@ Racecoe is a hybrid Formula 1 assistant (formerly the F1 Pit Wall chatbot). It r
 | **LLM** | [Ollama](https://ollama.com/) locally (`qwen2.5:7b-instruct-q8_0`); **Gemini 3.8 Flash** in production via `utils/llm.py` (Groq / OpenAI / Grok optional) |
 | **Embeddings & RAG** | LangChain, `langchain-huggingface`, **FAISS** (`faiss-cpu`), **BAAI/bge-base-en-v1.5**, PyTorch (CPU in Docker) |
 | **PDF / indexes** | `pypdf`, `pdf_processor.py`, `historical_processor.py` |
-| **Data** | **pandas** (historical CSVs), **OpenF1** REST API, Frankfurter FX API, optional **Kaggle** download (`kagglehub`) |
+| **Data** | **pandas** (historical CSVs, default), optional **PostgreSQL** (`f1.*` archive + `chat.*` sessions), **OpenF1** REST API, Frankfurter FX API, optional **Kaggle** download (`kagglehub`) |
 | **Frontend** | **React 18**, **Vite 6**, plain CSS (F1-themed tokens), Google Fonts (Oswald, Titillium Web, Merriweather) |
 | **Deploy** | **Docker**, `docker-compose.yml`, **Render** (`render.yaml`), health checks + smoke script |
 | **Testing** | `unittest` (235+ cases), Node test runner for answer formatting, `scripts/smoke_deploy.py` |
@@ -132,6 +132,31 @@ python server.py                    # http://127.0.0.1:5001
 
 **CLI only:** `python app.py` from a **Terminal** tab (not the IDE Debug Console) so backspace/arrows work.
 
+### Optional PostgreSQL
+
+CSV files and in-memory chat sessions remain the default (including Render). To use Postgres locally:
+
+```bash
+docker compose --profile db up -d postgres
+# in .env:
+# DATABASE_URL=postgresql://racecoe:racecoe@127.0.0.1:5432/racecoe
+python scripts/init_postgres.py
+python scripts/load_ergast_to_postgres.py
+# then set:
+# HISTORICAL_BACKEND=postgres
+# SESSION_STORE=postgres
+```
+
+| Env | Default | Effect |
+|-----|---------|--------|
+| `DATABASE_URL` | unset | No database connection |
+| `HISTORICAL_BACKEND` | `csv` | `csv` keeps pandas; `postgres` queries `f1.*`; `auto` uses Postgres when `f1.races` has rows |
+| `SESSION_STORE` | `memory` | `postgres` stores last turns in `chat.turns` (needed across app restarts / multiple instances) |
+
+Regulation **RAG still uses FAISS**. `db/schema.sql` includes `rag.*` article tables and optional `db/schema_pgvector.sql` for later vector search. New Ergast-shaped CSVs: re-run the loader (it truncates and reloads `f1.*`).
+
+`GET /api/health` includes a `database` object (reachable, archive row count, which backends are active).
+
 ### Production-shaped run (Docker)
 
 ```bash
@@ -231,7 +256,7 @@ Planned and natural extensions:
 | **Teams & grids** | Full constructor line-ups per season (drivers, numbers, team principals) from CSV + OpenF1, not only single driver–team lookups |
 | **Standings & points** | Championship tables, sprint points, and race-by-race progression from existing CSV + API fields |
 | **UI** | Streaming answers, richer session picker (FP1/FP2/Quali/Race), standings pages wired to real data (nav placeholders today) |
-| **Backend** | Session store (Redis) for multi-instance deploy; rate limiting; optional external embedding API to drop in-process torch |
+| **Backend** | **PostgreSQL** archive + sessions (opt-in via `DATABASE_URL`); Redis still planned for locks/rate-limits; optional external embedding API to drop in-process torch |
 | **RAG** | Close **B02** (empty chunks); stronger held-out eval (RAGAS/faithfulness) when the backlog allows |
 | **Data** | Post-2026 results via OpenF1-first path; more regulation seasons in `vector_store/` |
 
@@ -597,7 +622,16 @@ utils/
   driver_names.py       # F1DriversDataset name resolution
   driver_numbers.py     # Driver name → car number resolution
   f1_api.py             # OpenF1 API client + lap time formatting
-  historical_db.py      # CSV lookups: race results, driver teams, lap deltas
+  db.py                 # DATABASE_URL, schema apply, backend flags
+  historical_db.py      # Archive lookups (CSV or Postgres)
+  historical_pg.py      # SQL implementations of the same packets
+  chat_store.py         # Session history (memory or Postgres)
+db/
+  schema.sql            # f1 / chat / rag / app
+  schema_pgvector.sql   # optional embedding columns
+scripts/
+  init_postgres.py
+  load_ergast_to_postgres.py
   venues.py             # Circuit/country resolution + multi-GP clarification
   currency.py           # Live FX rates + multi-currency display
   citations.py          # Source footer formatting for answers
