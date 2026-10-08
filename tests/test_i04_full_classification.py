@@ -57,7 +57,7 @@ class TestI04FullClassification(unittest.TestCase):
         with (
             patch("app.extract_telemetry_params", return_value={"year": 2008, "country": "Great Britain", "driver_name": ""}),
             patch("app.get_historical_driver_info", return_value=packet) as csv_fn,
-            patch("app.search_with_metadata") as rag,
+            patch("utils.vector_store.search_with_metadata") as rag,
         ):
             ctx, source = app._historical_context("complete race results of the 2008 British Grand Prix", [])
 
@@ -77,7 +77,7 @@ class TestI04FullClassification(unittest.TestCase):
         with (
             patch("app.extract_telemetry_params", return_value={"year": 2026, "country": "Brazil", "driver_name": ""}),
             patch("app.get_historical_driver_info", return_value=packet) as csv_fn,
-            patch("app.search_with_metadata") as rag,
+            patch("utils.vector_store.search_with_metadata") as rag,
         ):
             ctx, _source = app._historical_context("results of brazilian gp 2021?", [])
         csv_fn.assert_called_once()
@@ -139,7 +139,7 @@ class TestI04FullClassification(unittest.TestCase):
     def test_german_gp_2019_prefers_csv_over_rag(self):
         with (
             patch("app.extract_telemetry_params", return_value={"year": 2026, "country": None, "driver_name": ""}),
-            patch("app.search_with_metadata") as rag,
+            patch("utils.vector_store.search_with_metadata") as rag,
         ):
             ctx, _source = app._historical_context("results of german gp 2019?", [])
 

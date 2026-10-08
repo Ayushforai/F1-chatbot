@@ -24,15 +24,25 @@ class TestPostgresConfig(unittest.TestCase):
             "postgresql://user:pass@host/db",
         )
 
-    def test_defaults_stay_on_csv_and_memory(self):
+    def test_defaults_are_auto_and_idle_without_database_url(self):
         env = {
-            "HISTORICAL_BACKEND": "csv",
-            "SESSION_STORE": "memory",
+            "HISTORICAL_BACKEND": "auto",
+            "SESSION_STORE": "auto",
             "DATABASE_URL": "",
         }
         with patch.dict(os.environ, env, clear=False):
-            self.assertEqual(historical_backend(), "csv")
-            self.assertEqual(session_store(), "memory")
+            self.assertEqual(historical_backend(), "auto")
+            self.assertEqual(session_store(), "auto")
+            self.assertFalse(uses_postgres_historical())
+            self.assertFalse(uses_postgres_sessions())
+
+    def test_explicit_csv_and_memory_disable_postgres(self):
+        env = {
+            "HISTORICAL_BACKEND": "csv",
+            "SESSION_STORE": "memory",
+            "DATABASE_URL": "postgresql://localhost/racecoe",
+        }
+        with patch.dict(os.environ, env, clear=False):
             self.assertFalse(uses_postgres_historical())
             self.assertFalse(uses_postgres_sessions())
 

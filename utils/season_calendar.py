@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
+from utils.db import uses_postgres_historical
 from utils.f1_api import fetch_year_meetings
 from utils.historical_db import circuits_df, csv_available, races_df
 
@@ -11,9 +12,13 @@ from utils.historical_db import circuits_df, csv_available, races_df
 def list_calendar_years() -> list[int]:
     current = datetime.now().year
     years = {current}
-    # CSV often lags the live season; keep recent years selectable for OpenF1 fallback.
+    # Archive often lags the live season; keep recent years selectable for OpenF1 fallback.
     years.update(range(current, current - 4, -1))
-    if csv_available() and races_df is not None:
+    if uses_postgres_historical():
+        from utils.historical_pg import calendar_years
+
+        years.update(calendar_years())
+    elif csv_available() and races_df is not None:
         years.update(int(year) for year in races_df["year"].dropna().unique())
     return sorted(years, reverse=True)
 
@@ -45,6 +50,25 @@ def _weekend(start: str, end: str) -> tuple[str, str]:
 
 
 def csv_season_calendar(year: int) -> list[dict]:
+    if uses_postgres_historical():
+        from utils.historical_pg import season_calendar
+
+        races = []
+        for row in season_calendar(year):
+            weekend_start, weekend_end = _weekend(row.get("fp1_date"), row.get("date"))
+            races.append(
+                {
+                    "round": int(row["round"]),
+                    "name": row.get("name") or "",
+                    "date": row.get("date") or "",
+                    "weekend_start": weekend_start,
+                    "weekend_end": weekend_end,
+                    "circuit": row.get("circuit") or "",
+                    "location": row.get("location") or "",
+                    "country": row.get("country") or "",
+                }
+            )
+        return races
     if not csv_available() or races_df is None or circuits_df is None:
         return []
     merged = races_df.merge(
@@ -74,7 +98,7 @@ def csv_season_calendar(year: int) -> list[dict]:
 
 def get_season_calendar(year: int) -> dict:
     races = csv_season_calendar(year)
-    source = "csv"
+    source = "postgres" if uses_postgres_historical() and races else "csv"
     if not races:
         races = fetch_year_meetings(year)
         source = "openf1"

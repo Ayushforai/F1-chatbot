@@ -13,7 +13,7 @@ class RegulationsYearDefaultTests(unittest.TestCase):
 
     def test_regulations_rag_search_includes_year(self):
         with patch(
-            "app.search_regulations",
+            "utils.vector_store.search_regulations",
             return_value=(["cost cap chunk"], [{"source": "data/financial.pdf", "page": 0, "article_id": "D4"}]),
         ) as search:
             context, source = app._regulations_rag_context("financial", "cost cap", 2026)

@@ -369,8 +369,8 @@ erDiagram
 | Env | Default | Effect |
 |-----|---------|--------|
 | `DATABASE_URL` | unset | No connection. `postgres://` URLs are normalized to `postgresql://`. |
-| `HISTORICAL_BACKEND` | `csv` | `csv` = pandas; `postgres` = SQL; `auto` = SQL when `f1.races` has rows |
-| `SESSION_STORE` | `memory` | `postgres` = persist turns (set only after `init_postgres.py`) |
+| `HISTORICAL_BACKEND` | `auto` | `csv` = pandas; `postgres` = always SQL; `auto` = SQL when `f1.races` has rows |
+| `SESSION_STORE` | `auto` | `memory` = process dict; `postgres` = `chat.turns`; `auto` = SQL when chat schema exists |
 
 `GET /api/health` includes `database`: URL set, reachable, archive row count, which backends are active.
 
@@ -386,7 +386,7 @@ python scripts/load_ergast_to_postgres.py
 # SESSION_STORE=postgres
 ```
 
-Compose uses `pgvector/pgvector:pg16` so `schema_pgvector.sql` can apply; if that step fails, core `f1` + `chat` still work and FAISS stays the RAG store. Render can keep `HISTORICAL_BACKEND=csv` until a Postgres instance is attached and loaded.
+Compose uses `pgvector/pgvector:pg16` so `schema_pgvector.sql` can apply; if that step fails, core `f1` + `chat` still work and FAISS stays the RAG store. Render can leave `HISTORICAL_BACKEND=auto` until a Postgres instance is attached and loaded (then SQL is used automatically).
 
 ---
 
