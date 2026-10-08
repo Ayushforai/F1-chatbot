@@ -13,5 +13,6 @@ langchain-huggingface
 pypdf
 ollama
 kagglehub
+psycopg[binary]
 # torch: Dockerfile installs the CPU wheel (https://download.pytorch.org/whl/cpu).
 # Local Mac/dev can `pip install torch` separately if missing from the venv.

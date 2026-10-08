@@ -39,6 +39,7 @@ RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu 
 COPY app.py server.py pdf_processor.py historical_processor.py \
      setup_historical_data.py setup_driver_numbers.py ./
 COPY utils ./utils
+COPY db ./db
 COPY data ./data
 # Indexes + historical CSVs are committed for cloud builds.
 COPY vector_store ./vector_store

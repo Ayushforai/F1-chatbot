@@ -3,6 +3,7 @@ import os
 import re
 from datetime import datetime, timezone
 
+from utils.db import uses_postgres_historical
 from utils.venues import csv_race_keywords, MULTI_GP_COUNTRIES, multi_gp_clarification
 
 DATA_DIR = "./data/historical_csvs"
@@ -40,7 +41,11 @@ except FileNotFoundError:
 
 
 def csv_available() -> bool:
-    """True when the core Ergast CSV tables loaded successfully."""
+    """True when the historical archive is available (CSV files or loaded Postgres)."""
+    if uses_postgres_historical():
+        from utils.historical_pg import archive_available
+
+        return archive_available()
     return all(
         frame is not None
         for frame in (
@@ -68,6 +73,10 @@ def _cell(value) -> str:
 
 def _races_for_venue(year: int, country: str, location: str | None = None) -> pd.DataFrame:
     """Return CSV race rows for a year/country, aggregating all venues when needed."""
+    if uses_postgres_historical():
+        from utils.historical_pg import races_for_venue_df
+
+        return races_for_venue_df(year, country, location=location)
     if races_df is None:
         return pd.DataFrame()
 
@@ -91,6 +100,10 @@ def _races_for_venue(year: int, country: str, location: str | None = None) -> pd
 
 def get_race_results(year: int, country: str, top_n: int | None = None, location: str | None = None) -> dict | str:
     """Return the full race classification, including DNFs and each driver's fastest lap."""
+    if uses_postgres_historical():
+        from utils.historical_pg import get_race_results as _pg_get_race_results
+
+        return _pg_get_race_results(year, country, top_n=top_n, location=location)
     from utils.race_schedule import (
         RACE_NOT_HELD_RESULTS_MESSAGE,
         _parse_race_date,
@@ -225,6 +238,10 @@ def get_qualifying_results(
     location: str | None = None,
 ) -> dict | str:
     """Return qualifying grid data for a Grand Prix."""
+    if uses_postgres_historical():
+        from utils.historical_pg import get_qualifying_results as _pg_qualifying
+
+        return _pg_qualifying(year, country, location=location)
     lookup = _session_results_common(
         year,
         country,
@@ -270,6 +287,10 @@ def get_sprint_results(
     location: str | None = None,
 ) -> dict | str:
     """Return sprint classification data for a Grand Prix."""
+    if uses_postgres_historical():
+        from utils.historical_pg import get_sprint_results as _pg_sprint
+
+        return _pg_sprint(year, country, location=location)
     lookup = _session_results_common(
         year,
         country,
@@ -421,6 +442,10 @@ def format_race_classification(packet: dict) -> str:
 
 
 def _resolve_driver(driver_ref: str) -> tuple[int, str] | None:
+    if uses_postgres_historical():
+        from utils.historical_pg import resolve_driver
+
+        return resolve_driver(driver_ref)
     if drivers_df is None:
         return None
     if not driver_ref or not str(driver_ref).strip():
@@ -491,6 +516,12 @@ def get_lap_time_delta(
     location: str | None = None,
 ) -> dict | str:
     """Return lap-time comparison for two drivers on a specific lap."""
+    if uses_postgres_historical():
+        from utils.historical_pg import get_lap_time_delta as _pg_delta
+
+        return _pg_delta(
+            year, country, driver_a, driver_b, lap_number, location=location
+        )
     missing = _require_csv()
     if missing:
         return missing
@@ -587,6 +618,17 @@ def get_max_fastest_lap_speed(
     year_end: int | None = None,
 ) -> dict | str:
     """Return the highest fastestLapSpeed from results.csv for the given scope."""
+    if uses_postgres_historical():
+        from utils.historical_pg import get_max_fastest_lap_speed as _pg_speed
+
+        return _pg_speed(
+            year=year,
+            country=country,
+            location=location,
+            driver_ref=driver_ref,
+            year_start=year_start,
+            year_end=year_end,
+        )
     missing = _require_csv()
     if missing:
         return missing
@@ -711,6 +753,10 @@ def format_top_speed_lookup(
 
 def get_grand_prix_by_country(country: str) -> list[dict] | str:
     """Return Grand Prix events held in a country from races.csv + circuits.csv."""
+    if uses_postgres_historical():
+        from utils.historical_pg import get_grand_prix_by_country as _pg_gp
+
+        return _pg_gp(country)
     missing = _require_csv()
     if missing:
         return missing
@@ -782,6 +828,10 @@ def format_country_grand_prix_listing_answer(query: str, countries: list[str]) -
 
 def get_driver_teams(year: int, driver_ref: str) -> dict | str:
     """Return the team(s) a driver raced for in a given season."""
+    if uses_postgres_historical():
+        from utils.historical_pg import get_driver_teams as _pg_teams
+
+        return _pg_teams(year, driver_ref)
     missing = _require_csv()
     if missing:
         return missing
@@ -857,6 +907,10 @@ def format_driver_teams(packet: dict) -> str:
 
 def get_driver_standing(year: int, driver_ref: str) -> dict | str:
     """Return a driver's end-of-season championship position and points."""
+    if uses_postgres_historical():
+        from utils.historical_pg import get_driver_standing as _pg_standing
+
+        return _pg_standing(year, driver_ref)
     missing = _require_csv()
     if missing:
         return missing
