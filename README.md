@@ -1,4 +1,4 @@
-# Racecoe
+# Racecoe 🏎️🏁
 
 ## Description
 
@@ -10,7 +10,7 @@ Racecoe is a hybrid Formula 1 assistant (formerly the F1 Pit Wall chatbot). It r
 
 ---
 
-## Technologies used
+## Technologies used ⚙️
 
 | Layer | Stack |
 |-------|--------|
@@ -28,9 +28,9 @@ Racecoe is a hybrid Formula 1 assistant (formerly the F1 Pit Wall chatbot). It r
 
 ---
 
-## Features
+## Features ✨
 
-### Routing & clarification
+### Routing & clarification 🔀
 - **Intent routing** — classifies queries into general, sporting, technical, financial, operational, quantitative, historical, or ambiguous
 - **Ambiguous query guard** — vague questions get a capabilities menu instead of a wrong guess
 - **Year clarification** — race, lap, and driver-team lookups ask for a season before defaulting to 2026
@@ -38,26 +38,26 @@ Racecoe is a hybrid Formula 1 assistant (formerly the F1 Pit Wall chatbot). It r
 - **Driver clarification** — lap and telemetry queries require a named driver; no silent default to Hamilton
 - **Driver number lookup** — names, surnames, and `#NN` tokens map to car numbers via `data/driver_numbers.json` (OpenF1 grid). `F1DriversDataset.csv` helps recognize 868 canonical driver names in query text before number lookup.
 
-### Live & quantitative data
+### Live & quantitative data 📊
 - **OpenF1 integration** — fastest lap, specific-lap lookups, and live telemetry when a session is actually live
 - **Session-aware fastest laps** — practice (FP1/FP2/FP3), qualifying, sprint, and race fastest-lap queries hit OpenF1 directly; “latest fp2 session” resolves via `session_key=latest` without needing a Grand Prix in the question (no LLM round-trip)
 - **Lap time formatting** — API responses use F1-style `M:SS.mmm` display
 - **Top-speed lookup** — highest speed-trap readings via OpenF1 (2021+) and fastest-lap speeds from CSV; handles all-time and GP-specific queries
 - **OpenF1 timeouts** — HTTP calls use a 15s timeout so a stuck API cannot hang chat indefinitely
 
-### Historical data (CSV + RAG)
+### Historical data (CSV + RAG) 📃
 - **Full race classifications** — pre-2026 result queries use CSV directly: every finisher, DNFs, and fastest laps (not just the top 10)
 - **Driver-team lookups** — career questions like “Which team did Hamilton drive for in 2012?” resolve from `results.csv` (supports surname or full name, e.g. “Lance Stroll”)
 - **Historical RAG** — FAISS search over processed race documents for broader historical questions
 - **Venue-aware CSV matching** — country/circuit synonyms map correctly to the right Grand Prix
 
-### Regulations
+### Regulations ⚠️
 - **Regulation RAG** — FAISS vector search over FIA regulation PDFs (general/Section A, sporting, technical, financial, operational)
 - **Article-aware indexing** — PDFs split by `ARTICLE` headings with section/article metadata; `articles.json` enables exact Article lookups
 - **Hybrid retrieval** — article/section refs hit structured lookup first; broad questions retrieve more chunks
 - **Regulation year default** — yearless regulation queries default to the current season, with an option to ask about another year
 
-### Conversation & display
+### Conversation & display 🗨️
 - **Conversation memory** — last 5 turns stored with answers; follow-ups like “Who finished second?” or “and in 2023?” reuse prior context
 - **Fresh re-fetch** — when memory is insufficient or the user asks to verify, the bot re-queries CSV, API, or RAG
 - **Currency display** — financial amounts shown in USD, INR, and GBP (penalties: USD + INR only), using live rates from the Frankfurter API with cached fallback
@@ -66,16 +66,16 @@ Racecoe is a hybrid Formula 1 assistant (formerly the F1 Pit Wall chatbot). It r
 
 ---
 
-## What you can do
+## What you can do 👥
 
-### In the web app
+### In the web app 🌐
 - **Chat** — ask natural-language F1 questions; get markdown answers with source footers
 - **Schedule** — browse season calendar (OpenF1 meetings + race weekend dates)
 - **About** — capability overview (live data, archive, regulations, clarifications)
 - **Race bar** — step through rounds; jump to schedule from the current GP chip
 - **New session** — reset conversation history (nav icon or **Reset** in chat)
 
-### Example questions
+### Example questions ❔
 
 | You ask | What happens |
 |---------|----------------|
@@ -88,14 +88,14 @@ Racecoe is a hybrid Formula 1 assistant (formerly the F1 Pit Wall chatbot). It r
 | “Who finished second?” after a race answer | Conversation memory or fresh CSV re-fetch |
 | Vague “tell me about F1” | Capabilities menu instead of a random guess |
 
-### CLI
+### CLI 💻
 - Same pipeline as the API: `python app.py` in a real terminal (readline line editing when available).
 
 ---
 
-## How to run the project
+## How to run the project 📲
 
-### Requirements
+### Requirements 📦
 
 | | |
 |--|--|
@@ -149,7 +149,7 @@ See [Models & deployment](#models--deployment-local-vs-production), [Setup (loca
 
 ---
 
-## Live demo
+## Live demo 🎥
 
 <!-- Replace the placeholder below when your video is ready -->
 
@@ -165,7 +165,7 @@ Suggested demo flow for recording:
 
 ---
 
-## Keyboard shortcuts
+## Keyboard shortcuts ⌨️
 
 | Context | Action | Shortcut |
 |---------|--------|----------|
@@ -178,7 +178,7 @@ There are no global web hotkeys beyond clicking **Chat / Schedule / About**, sug
 
 ---
 
-## The process
+## The process 🔄️
 
 End-to-end flow for one user message:
 
@@ -209,7 +209,7 @@ flowchart LR
 
 ---
 
-## What I learned
+## What I learned 🧠
 
 Building Racecoe surfaced practical lessons beyond “call an LLM”:
 
@@ -222,7 +222,7 @@ Building Racecoe surfaced practical lessons beyond “call an LLM”:
 
 ---
 
-## Overall growth & roadmap
+## Overall growth & roadmap 📈
 
 Planned and natural extensions:
 
@@ -237,7 +237,7 @@ Planned and natural extensions:
 
 ---
 
-## How Racecoe can be improved
+## How Racecoe can be improved 🔁
 
 **Product**
 - Wire **Results / Standings / Drivers / Teams** nav to live data instead of routing to chat only.
@@ -258,7 +258,7 @@ Planned and natural extensions:
 
 ---
 
-## Models & deployment (local vs production)
+## Models & deployment (local vs production) 🤖
 
 Racecoe uses **different LLM setups** for local development and cloud deployment:
 
@@ -298,7 +298,7 @@ export GEMINI_THINKING_LEVEL=LOW           # LOW|MEDIUM|HIGH for 3.8
 
 Embeddings stay on **Hugging Face** (`BAAI/bge-base-en-v1.5`) in both environments (set `HF_TOKEN`).
 
-## Requirements
+## Requirements 📦
 
 ### Local development
 - Python 3.11+
@@ -306,7 +306,7 @@ Embeddings stay on **Hugging Face** (`BAAI/bge-base-en-v1.5`) in both environmen
 - [Ollama](https://ollama.com/) with `qwen2.5:7b-instruct-q8_0` pulled locally
 - Hugging Face read token (for embedding model downloads)
 
-### Production / deploy
+### Production / deploy 
 - Docker (recommended) — see `Dockerfile`
 - Cloud LLM: **Gemini** (recommended) or **Groq**
 - Host secrets: `HF_TOKEN`, `GEMINI_API_KEY` or `GROQ_API_KEY`, optional `CORS_ORIGINS`
@@ -408,7 +408,7 @@ On startup you will see:
 
 That is a **one-time load per process** (~5–15s on CPU). The weights then stay in memory until you exit the bot. Switching between regulation categories or historical RAG does not reload them.
 
-Example queries:
+Example queries: 🗣️
 
 | Query | Route |
 |---|---|
@@ -577,7 +577,7 @@ python scripts/smoke_deploy.py --http --base-url http://127.0.0.1:8000
 python scripts/smoke_deploy.py --http --base-url https://racecoe.onrender.com
 ```
 
-## Project Structure
+## Project Structure 🏗️
 
 ```
 app.py                  # Main chat loop, clarification flows, memory
@@ -612,7 +612,7 @@ vector_store/           # Generated FAISS indexes (gitignored)
 ISSUES.md               # Bug backlog and fix history
 ```
 
-## Data Notes
+## Data Notes 🗒️
 
 - **FIA PDFs**: Regulation sections are included in `data/`
 - **Historical CSVs**: From the [Kaggle F1 dataset](https://www.kaggle.com/datasets/rohanrao/formula-1-world-championship-1950-2020) (1950–2020)
@@ -692,7 +692,7 @@ export RAG_WARMUP_CATEGORIES=historical,sporting,financial
 python app.py
 ```
 
-### Deployment notes
+### Deployment notes 📔
 
 | Setup | Recommendation |
 |-------|----------------|
