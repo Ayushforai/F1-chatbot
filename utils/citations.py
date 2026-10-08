@@ -24,41 +24,36 @@ def append_citation(answer: str, source: SourceCitation | None) -> str:
     return answer.rstrip() + footer
 
 
+def _archive_citation(kind_files: str, detail: str) -> SourceCitation:
+    from utils.db import uses_postgres_historical
+
+    if uses_postgres_historical():
+        return SourceCitation("postgres", f"PostgreSQL (f1.*) — {detail}")
+    return SourceCitation("csv", f"Historical CSV ({kind_files}) — {detail}")
+
+
 def csv_race_results(*, year: int, venue: str | None = None) -> SourceCitation:
     detail = f"{year} {venue}" if venue else str(year)
-    return SourceCitation(
-        "csv",
-        f"Historical CSV (results.csv, races.csv) — {detail}",
-    )
+    return _archive_citation("results.csv, races.csv", detail)
 
 
 def csv_driver_teams(*, year: int) -> SourceCitation:
-    return SourceCitation(
-        "csv",
-        f"Historical CSV (results.csv, drivers.csv, constructors.csv) — {year} season",
+    return _archive_citation(
+        "results.csv, drivers.csv, constructors.csv", f"{year} season"
     )
 
 
 def csv_driver_standing(*, year: int) -> SourceCitation:
-    return SourceCitation(
-        "csv",
-        f"Historical CSV (driver_standings.csv, races.csv) — {year} season",
-    )
+    return _archive_citation("driver_standings.csv, races.csv", f"{year} season")
 
 
 def csv_lap_times(*, year: int, venue: str, lap: int | None = None) -> SourceCitation:
     lap_bit = f", lap {lap}" if lap is not None else ""
-    return SourceCitation(
-        "csv",
-        f"Historical CSV (lap_times.csv) — {year} {venue}{lap_bit}",
-    )
+    return _archive_citation("lap_times.csv", f"{year} {venue}{lap_bit}")
 
 
 def csv_top_speed(*, scope: str) -> SourceCitation:
-    return SourceCitation(
-        "csv",
-        f"Historical CSV (results.csv fastestLapSpeed) — {scope}",
-    )
+    return _archive_citation("results.csv fastestLapSpeed", scope)
 
 
 def openf1_speed_trap(*, detail: str) -> SourceCitation:
@@ -87,10 +82,7 @@ def rag_regulations(*, category: str, year: int, doc_labels: list[str]) -> Sourc
 
 def csv_country_races(*, countries: list[str]) -> SourceCitation:
     joined = ", ".join(countries)
-    return SourceCitation(
-        "csv",
-        f"Historical CSV (races.csv, circuits.csv) — Grands Prix in {joined}",
-    )
+    return _archive_citation("races.csv, circuits.csv", f"Grands Prix in {joined}")
 
 
 def multi_gp_venue_map(*, countries: list[str]) -> SourceCitation:

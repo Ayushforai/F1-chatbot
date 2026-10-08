@@ -24,7 +24,7 @@ Racecoe is a hybrid Formula 1 assistant (formerly the F1 Pit Wall chatbot). It r
 | **Deploy** | **Docker**, `docker-compose.yml`, **Render** (`render.yaml`), health checks + smoke script |
 | **Testing** | `unittest` (235+ cases), Node test runner for answer formatting, `scripts/smoke_deploy.py` |
 
-**Environment & secrets:** `.env` — `HF_TOKEN`, `GEMINI_API_KEY` (or other `LLM_*` keys), optional `RAG_WARMUP_CATEGORIES`, `F1_SKIP_WARMUP`, `CORS_ORIGINS`.
+**Environment & secrets:** `.env` — `HF_TOKEN`, `GEMINI_API_KEY` (or other `LLM_*` keys), optional `RAG_WARMUP_CATEGORIES`, `F1_SKIP_WARMUP`, `CORS_ORIGINS`, optional `DATABASE_URL` / `HISTORICAL_BACKEND` / `SESSION_STORE`.
 
 ---
 
@@ -49,7 +49,7 @@ Racecoe is a hybrid Formula 1 assistant (formerly the F1 Pit Wall chatbot). It r
 - **Full race classifications** — pre-2026 result queries use CSV directly: every finisher, DNFs, and fastest laps (not just the top 10)
 - **Driver-team lookups** — career questions like “Which team did Hamilton drive for in 2012?” resolve from `results.csv` (supports surname or full name, e.g. “Lance Stroll”)
 - **Historical RAG** — FAISS search over processed race documents for broader historical questions
-- **Venue-aware CSV matching** — country/circuit synonyms map correctly to the right Grand Prix
+- **Venue-aware matching** — country/circuit synonyms map correctly to the right Grand Prix
 
 ### Regulations ⚠️
 - **Regulation RAG** — FAISS vector search over FIA regulation PDFs (general/Section A, sporting, technical, financial, operational)
@@ -80,8 +80,8 @@ Racecoe is a hybrid Formula 1 assistant (formerly the F1 Pit Wall chatbot). It r
 | You ask | What happens |
 |---------|----------------|
 | Cost cap / sporting / technical rules | Regulation RAG + optional year follow-up |
-| Full Monaco 2021 results | CSV classification; optional Qualifying/Sprint follow-up |
-| Hamilton’s team in 2012 | CSV driver–team lookup |
+| Full Monaco 2021 results | Archive classification (CSV or Postgres); optional Qualifying/Sprint follow-up |
+| Hamilton’s team in 2012 | Archive driver–team lookup |
 | Lap 12 at Monza 2024 for a driver | OpenF1 lap packet |
 | Fastest lap in latest **FP2** for Hamilton | OpenF1 session + laps (direct API path) |
 | Live telemetry for `#1` | OpenF1 only when a session is in the live window |
@@ -134,28 +134,16 @@ python server.py                    # http://127.0.0.1:5001
 
 ### Optional PostgreSQL
 
-CSV files and in-memory chat sessions remain the default (including Render). To use Postgres locally:
+See **[PostgreSQL in Racecoe](#postgresql-in-racecoe)** for diagrams, schema tables, and how it helps. Quick start:
 
 ```bash
 docker compose --profile db up -d postgres
-# in .env:
 # DATABASE_URL=postgresql://racecoe:racecoe@127.0.0.1:5432/racecoe
 python scripts/init_postgres.py
 python scripts/load_ergast_to_postgres.py
-# then set:
 # HISTORICAL_BACKEND=postgres
 # SESSION_STORE=postgres
 ```
-
-| Env | Default | Effect |
-|-----|---------|--------|
-| `DATABASE_URL` | unset | No database connection |
-| `HISTORICAL_BACKEND` | `csv` | `csv` keeps pandas; `postgres` queries `f1.*`; `auto` uses Postgres when `f1.races` has rows |
-| `SESSION_STORE` | `memory` | `postgres` stores last turns in `chat.turns` (needed across app restarts / multiple instances) |
-
-Regulation **RAG still uses FAISS**. `db/schema.sql` includes `rag.*` article tables and optional `db/schema_pgvector.sql` for later vector search. New Ergast-shaped CSVs: re-run the loader (it truncates and reloads `f1.*`).
-
-`GET /api/health` includes a `database` object (reachable, archive row count, which backends are active).
 
 ### Production-shaped run (Docker)
 
@@ -210,13 +198,14 @@ End-to-end flow for one user message:
 ```mermaid
 flowchart LR
   UI[React UI / CLI] --> API[FastAPI server.py]
+  API --> MEM[chat_store memory or Postgres]
   API --> PQ[process_query app.py]
   PQ --> R{Router + handlers}
-  R --> CSV[Historical CSV]
+  R --> ARCH[historical_db CSV or Postgres]
   R --> OF1[OpenF1 API]
   R --> RAG[FAISS + embeddings]
   R --> LLM[Gemini / Ollama]
-  CSV --> CTX[Context packet]
+  ARCH --> CTX[Context packet]
   OF1 --> CTX
   RAG --> CTX
   CTX --> LLM
@@ -226,9 +215,9 @@ flowchart LR
 1. **Ingress** — `POST /api/chat` with `session_id` + message; per-session lock keeps history consistent; different users run in parallel.
 2. **Pre-routing** — Specialized handlers (race results, driver teams, session fastest lap, top speed, lap deltas, clarifications) run before generic LLM routing.
 3. **Routing** — LLM classifies intent (regulation category, historical, quantitative, ambiguous).
-4. **Retrieval** — CSV SQL-like pandas lookups, OpenF1 HTTP, or hybrid regulation search (exact article + vector).
+4. **Retrieval** — Archive lookups (pandas CSV or PostgreSQL `f1.*`), OpenF1 HTTP, or hybrid regulation search (exact article + vector).
 5. **Generation** — LLM answers **only** from the context packet; citations appended from `utils/citations.py`.
-6. **Memory** — Last 5 turns stored per session; follow-ups can reuse answers or trigger re-fetch.
+6. **Memory** — Last 5 turns stored per session (in-process dict or `chat.turns`); follow-ups can reuse answers or trigger re-fetch.
 
 **Boot:** optional embedding warmup (`initialize_pipeline` / `F1_SKIP_WARMUP` on small hosts).
 
@@ -626,17 +615,17 @@ utils/
   historical_db.py      # Archive lookups (CSV or Postgres)
   historical_pg.py      # SQL implementations of the same packets
   chat_store.py         # Session history (memory or Postgres)
-db/
-  schema.sql            # f1 / chat / rag / app
-  schema_pgvector.sql   # optional embedding columns
-scripts/
-  init_postgres.py
-  load_ergast_to_postgres.py
   venues.py             # Circuit/country resolution + multi-GP clarification
   currency.py           # Live FX rates + multi-currency display
   citations.py          # Source footer formatting for answers
   embeddings.py         # HuggingFace embeddings (singleton cache, HF_TOKEN)
   vector_store.py       # FAISS search wrapper (per-category index cache)
+db/
+  schema.sql            # f1 / chat / rag / app
+  schema_pgvector.sql   # optional embedding columns
+scripts/
+  init_postgres.py      # Apply schema to DATABASE_URL
+  load_ergast_to_postgres.py
 tests/                  # Regression tests (incl. test_concurrent_sessions.py, test_session_fastest_lap.py)
 data/
   *.pdf                 # FIA regulation documents
@@ -651,7 +640,8 @@ ISSUES.md               # Bug backlog and fix history
 - **FIA PDFs**: Regulation sections are included in `data/`
 - **Historical CSVs**: From the [Kaggle F1 dataset](https://www.kaggle.com/datasets/rohanrao/formula-1-world-championship-1950-2020) (1950–2020)
 - **Archive PDFs**: Older regulation PDFs in `data/archive/` are gitignored due to size; add them locally if needed
-- **OpenF1**: Used for 2021+ live and lap data; pre-2026 race results and lap deltas come from CSV
+- **OpenF1**: Used for 2021+ live and lap data; pre-2026 race results and lap deltas come from the historical archive (CSV by default, PostgreSQL when enabled)
+- **PostgreSQL**: Optional; see [PostgreSQL in Racecoe](#postgresql-in-racecoe)
 
 ## RAG performance & deployment
 

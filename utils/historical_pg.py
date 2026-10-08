@@ -54,6 +54,45 @@ def races_for_venue_df(year: int, country: str, location: str | None = None) -> 
     return pd.DataFrame(rows)
 
 
+def calendar_years() -> list[int]:
+    with connect() as conn:
+        rows = conn.execute("SELECT DISTINCT year FROM f1.races ORDER BY year DESC").fetchall()
+    return [int(row["year"]) for row in rows]
+
+
+def season_calendar(year: int) -> list[dict]:
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT r.round, r.name, r.race_date, r.fp1_date,
+                   c.name AS circuit, c.location, c.country
+            FROM f1.races r
+            LEFT JOIN f1.circuits c ON c.circuit_id = r.circuit_id
+            WHERE r.year = %s
+            ORDER BY r.round
+            """,
+            (year,),
+        ).fetchall()
+    races = []
+    for row in rows:
+        race_date = str(row.get("race_date") or "")[:10]
+        fp1 = str(row.get("fp1_date") or "")[:10]
+        if fp1 in ("None", "NaT"):
+            fp1 = ""
+        races.append(
+            {
+                "round": int(row["round"]),
+                "name": row.get("name") or "",
+                "date": race_date,
+                "fp1_date": fp1,
+                "circuit": row.get("circuit") or "",
+                "location": row.get("location") or "",
+                "country": row.get("country") or "",
+            }
+        )
+    return races
+
+
 def archive_available() -> bool:
     try:
         with connect() as conn:

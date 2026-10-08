@@ -23,31 +23,40 @@ def normalize_database_url(url: str) -> str:
 
 
 def historical_backend() -> str:
-    """csv | postgres | auto (postgres when DATABASE_URL is set and f1.races has rows)."""
-    raw = (os.getenv("HISTORICAL_BACKEND") or "csv").strip().lower()
+    """csv | postgres | auto (Postgres when DATABASE_URL is set and f1.races has rows)."""
+    raw = (os.getenv("HISTORICAL_BACKEND") or "auto").strip().lower()
     if raw in {"csv", "postgres", "auto"}:
         return raw
-    return "csv"
+    return "auto"
 
 
 def session_store() -> str:
-    """memory | postgres. Default memory so chat works before schema is applied."""
-    raw = (os.getenv("SESSION_STORE") or "memory").strip().lower()
-    if raw in {"memory", "postgres"}:
+    """memory | postgres | auto (Postgres when DATABASE_URL is set and chat schema exists)."""
+    raw = (os.getenv("SESSION_STORE") or "auto").strip().lower()
+    if raw in {"memory", "postgres", "auto"}:
         return raw
-    return "memory"
-
-
-def uses_postgres_sessions() -> bool:
-    return bool(database_url()) and session_store() == "postgres"
+    return "auto"
 
 
 _pg_archive_ready: bool | None = None
+_pg_sessions_ready: bool | None = None
 
 
 def reset_backend_cache() -> None:
-    global _pg_archive_ready
+    global _pg_archive_ready, _pg_sessions_ready
     _pg_archive_ready = None
+    _pg_sessions_ready = None
+
+
+def uses_postgres_sessions() -> bool:
+    if not database_url():
+        return False
+    mode = session_store()
+    if mode == "memory":
+        return False
+    if mode == "postgres":
+        return True
+    return postgres_sessions_ready()
 
 
 def uses_postgres_historical() -> bool:
@@ -75,6 +84,22 @@ def postgres_archive_ready() -> bool:
     except Exception:
         _pg_archive_ready = False
     return _pg_archive_ready
+
+
+def postgres_sessions_ready() -> bool:
+    global _pg_sessions_ready
+    if _pg_sessions_ready is not None:
+        return _pg_sessions_ready
+    if not database_url():
+        _pg_sessions_ready = False
+        return False
+    try:
+        with connect() as conn:
+            conn.execute("SELECT 1 FROM chat.sessions LIMIT 1")
+        _pg_sessions_ready = True
+    except Exception:
+        _pg_sessions_ready = False
+    return _pg_sessions_ready
 
 
 @contextmanager

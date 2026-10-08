@@ -76,7 +76,7 @@ class TestI03LiveTelemetry(unittest.TestCase):
                 return _response([PAST_SESSION])
             raise AssertionError(f"Unexpected request: {url}")
 
-        with patch("utils.f1_api.requests.get", side_effect=fake_get):
+        with patch("utils.f1_api._http_get", side_effect=fake_get):
             result = get_driver_telemetry(1, now=NOW_OFF_WEEKEND)
 
         self.assertEqual(result, LIVE_DATA_UNAVAILABLE_MESSAGE)
@@ -96,7 +96,7 @@ class TestI03LiveTelemetry(unittest.TestCase):
                 return _response([{"speed": 312, "rpm": 11000, "gear": 7, "drs": 0, "date": "2026-08-16T10:00:01+00:00"}])
             raise AssertionError(f"Unexpected request: {url}")
 
-        with patch("utils.f1_api.requests.get", side_effect=fake_get):
+        with patch("utils.f1_api._http_get", side_effect=fake_get):
             result = get_driver_telemetry(1, now=NOW_DURING_LIVE)
 
         self.assertEqual(result["speed"], 312)
@@ -111,7 +111,7 @@ class TestI03LiveTelemetry(unittest.TestCase):
                 return _response([LIVE_SESSION])
             return _response([], status=403)
 
-        with patch("utils.f1_api.requests.get", side_effect=fake_get):
+        with patch("utils.f1_api._http_get", side_effect=fake_get):
             result = get_driver_telemetry(44, now=NOW_DURING_LIVE)
 
         self.assertEqual(result, LIVE_DATA_UNAVAILABLE_MESSAGE)

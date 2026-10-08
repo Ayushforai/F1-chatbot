@@ -3,7 +3,7 @@ import os
 import re
 from datetime import datetime, timezone
 
-from utils.db import uses_postgres_historical
+from utils.db import historical_backend, uses_postgres_historical
 from utils.venues import csv_race_keywords, MULTI_GP_COUNTRIES, multi_gp_clarification
 
 DATA_DIR = "./data/historical_csvs"
@@ -25,19 +25,21 @@ qualifying_df = None
 sprint_results_df = None
 driver_standings_df = None
 
-try:
-    races_df = pd.read_csv(os.path.join(DATA_DIR, "races.csv"))
-    circuits_df = pd.read_csv(os.path.join(DATA_DIR, "circuits.csv"))
-    drivers_df = pd.read_csv(os.path.join(DATA_DIR, "drivers.csv"))
-    constructors_df = pd.read_csv(os.path.join(DATA_DIR, "constructors.csv"))
-    results_df = pd.read_csv(os.path.join(DATA_DIR, "results.csv"))
-    status_df = pd.read_csv(os.path.join(DATA_DIR, "status.csv"))
-    lap_times_df = pd.read_csv(os.path.join(DATA_DIR, "lap_times.csv"))
-    qualifying_df = pd.read_csv(os.path.join(DATA_DIR, "qualifying.csv"))
-    sprint_results_df = pd.read_csv(os.path.join(DATA_DIR, "sprint_results.csv"))
-    driver_standings_df = pd.read_csv(os.path.join(DATA_DIR, "driver_standings.csv"))
-except FileNotFoundError:
-    print(f"Warning: {CSV_UNAVAILABLE_MESSAGE}")
+# Skip RAM-heavy CSV load when the process is explicitly Postgres-only.
+if historical_backend() != "postgres":
+    try:
+        races_df = pd.read_csv(os.path.join(DATA_DIR, "races.csv"))
+        circuits_df = pd.read_csv(os.path.join(DATA_DIR, "circuits.csv"))
+        drivers_df = pd.read_csv(os.path.join(DATA_DIR, "drivers.csv"))
+        constructors_df = pd.read_csv(os.path.join(DATA_DIR, "constructors.csv"))
+        results_df = pd.read_csv(os.path.join(DATA_DIR, "results.csv"))
+        status_df = pd.read_csv(os.path.join(DATA_DIR, "status.csv"))
+        lap_times_df = pd.read_csv(os.path.join(DATA_DIR, "lap_times.csv"))
+        qualifying_df = pd.read_csv(os.path.join(DATA_DIR, "qualifying.csv"))
+        sprint_results_df = pd.read_csv(os.path.join(DATA_DIR, "sprint_results.csv"))
+        driver_standings_df = pd.read_csv(os.path.join(DATA_DIR, "driver_standings.csv"))
+    except FileNotFoundError:
+        print(f"Warning: {CSV_UNAVAILABLE_MESSAGE}")
 
 
 def csv_available() -> bool:
@@ -62,6 +64,11 @@ def csv_available() -> bool:
 def _require_csv() -> str | None:
     if csv_available():
         return None
+    if uses_postgres_historical() or historical_backend() == "postgres":
+        return (
+            "Historical PostgreSQL archive is not available. "
+            "Run: python scripts/load_ergast_to_postgres.py"
+        )
     return CSV_UNAVAILABLE_MESSAGE
 
 

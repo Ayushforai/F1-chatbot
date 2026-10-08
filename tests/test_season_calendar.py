@@ -61,7 +61,7 @@ class SeasonCalendarTests(unittest.TestCase):
 
             return Response()
 
-        with patch("utils.f1_api.requests.get", side_effect=fake_get):
+        with patch("utils.f1_api._http_get", side_effect=fake_get):
             races = fetch_year_meetings(2026)
 
         self.assertEqual(races[0]["weekend_start"], "2026-09-04")

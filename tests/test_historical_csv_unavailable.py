@@ -1,3 +1,4 @@
+import os
 import unittest
 from unittest.mock import patch
 
@@ -14,6 +15,22 @@ from utils.historical_db import (
 
 
 class TestHistoricalCsvAvailability(unittest.TestCase):
+    def setUp(self):
+        self._backend = os.environ.get("HISTORICAL_BACKEND")
+        os.environ["HISTORICAL_BACKEND"] = "csv"
+        from utils.db import reset_backend_cache
+
+        reset_backend_cache()
+
+    def tearDown(self):
+        if self._backend is None:
+            os.environ.pop("HISTORICAL_BACKEND", None)
+        else:
+            os.environ["HISTORICAL_BACKEND"] = self._backend
+        from utils.db import reset_backend_cache
+
+        reset_backend_cache()
+
     def test_csv_available_when_data_loaded(self):
         self.assertTrue(csv_available())
 
