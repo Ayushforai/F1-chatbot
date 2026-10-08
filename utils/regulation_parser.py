@@ -36,6 +36,7 @@ CATEGORY_PATTERNS: list[tuple[str, tuple[str, ...]]] = [
 SECTION_FROM_FILENAME_RE = re.compile(r"section[_\s-]*([a-e])", re.IGNORECASE)
 
 PDF_SEARCH_DIRS = ("./data", "./data/archive")
+PDF_SKIP_DIR_NAMES = frozenset({"historical_csvs", "faiss_db", "vector_db"})
 CHUNK_SIZE = 800
 CHUNK_OVERLAP = 100
 
@@ -82,19 +83,24 @@ def pdf_priority_key(filename: str) -> tuple[int, str, int]:
 
 
 def discover_regulation_pdfs() -> dict[str, list[str]]:
-    """Return PDF paths grouped by category from data/ and data/archive/."""
+    """Return PDF paths grouped by category under data/ (recursive) and data/archive/."""
     grouped: dict[str, list[str]] = {category: [] for category, _ in CATEGORY_PATTERNS}
 
-    for directory in PDF_SEARCH_DIRS:
+    def _scan_tree(directory: str) -> None:
         if not os.path.isdir(directory):
-            continue
-        for name in os.listdir(directory):
-            if not name.lower().endswith(".pdf"):
-                continue
-            category = classify_regulation_pdf(name)
-            if category is None:
-                continue
-            grouped[category].append(os.path.join(directory, name))
+            return
+        for root, dirnames, files in os.walk(directory):
+            dirnames[:] = [name for name in dirnames if name not in PDF_SKIP_DIR_NAMES]
+            for name in files:
+                if not name.lower().endswith(".pdf"):
+                    continue
+                category = classify_regulation_pdf(name)
+                if category is None:
+                    continue
+                grouped[category].append(os.path.join(root, name))
+
+    for directory in PDF_SEARCH_DIRS:
+        _scan_tree(directory)
 
     return grouped
 

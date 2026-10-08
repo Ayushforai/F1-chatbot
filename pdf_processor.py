@@ -22,7 +22,8 @@ def process_rulebooks():
 
     if not any(selected.values()):
         print(
-            "Error: No regulation PDFs found. Add FIA PDFs under ./data or ./data/archive "
+            "Error: No regulation PDFs found. Add FIA PDFs under ./data (e.g. ./data/Regulations) "
+            "or ./data/archive "
             "(sporting, technical, financial, operational, or Section A–E files)."
         )
         return
