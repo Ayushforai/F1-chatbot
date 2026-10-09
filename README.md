@@ -19,12 +19,12 @@ Racecoe is a hybrid Formula 1 assistant (formerly the F1 Pit Wall chatbot). It r
 | **LLM** | [Ollama](https://ollama.com/) locally (`qwen2.5:7b-instruct-q8_0`); **Gemini 3.8 Flash** in production via `utils/llm.py` (Groq / OpenAI / Grok optional) |
 | **Embeddings & RAG** | LangChain, `langchain-huggingface`, **FAISS** (`faiss-cpu`), **BAAI/bge-base-en-v1.5**, PyTorch (CPU in Docker) |
 | **PDF / indexes** | `pypdf`, `pdf_processor.py`, `historical_processor.py` |
-| **Data** | **pandas** (historical CSVs), **OpenF1** REST API, Frankfurter FX API, optional **Kaggle** download (`kagglehub`) |
+| **Data** | **PostgreSQL** (`f1.*` archive + `chat.*` sessions) in Docker/Render; **pandas** CSVs as fallback without `DATABASE_URL`; **OpenF1** REST API, Frankfurter FX API, optional **Kaggle** download (`kagglehub`) |
 | **Frontend** | **React 18**, **Vite 6**, plain CSS (F1-themed tokens), Google Fonts (Oswald, Titillium Web, Merriweather) |
 | **Deploy** | **Docker**, `docker-compose.yml`, **Render** (`render.yaml`), health checks + smoke script |
 | **Testing** | `unittest` (235+ cases), Node test runner for answer formatting, `scripts/smoke_deploy.py` |
 
-**Environment & secrets:** `.env` — `HF_TOKEN`, `GEMINI_API_KEY` (or other `LLM_*` keys), optional `RAG_WARMUP_CATEGORIES`, `F1_SKIP_WARMUP`, `CORS_ORIGINS`.
+**Environment & secrets:** `.env` — `HF_TOKEN`, `GEMINI_API_KEY` (or other `LLM_*` keys), optional `RAG_WARMUP_CATEGORIES`, `F1_SKIP_WARMUP`, `CORS_ORIGINS`. Docker/Render set `DATABASE_URL`, `HISTORICAL_BACKEND=postgres`, and `SESSION_STORE=postgres`.
 
 ---
 
@@ -50,7 +50,7 @@ Racecoe is a hybrid Formula 1 assistant (formerly the F1 Pit Wall chatbot). It r
 - **Full race classifications** — pre-2026 result queries use CSV directly: every finisher, DNFs, and fastest laps (not just the top 10)
 - **Driver-team lookups** — career questions like “Which team did Hamilton drive for in 2012?” resolve from `results.csv` (supports surname or full name, e.g. “Lance Stroll”)
 - **Historical RAG** — FAISS search over processed race documents for broader historical questions
-- **Venue-aware CSV matching** — country/circuit synonyms map correctly to the right Grand Prix
+- **Venue-aware matching** — country/circuit synonyms map correctly to the right Grand Prix
 
 ### Regulations ⚠️
 - **Regulation RAG** — FAISS vector search over FIA regulation PDFs (general/Section A, sporting, technical, financial, operational)
@@ -81,8 +81,8 @@ Racecoe is a hybrid Formula 1 assistant (formerly the F1 Pit Wall chatbot). It r
 | You ask | What happens |
 |---------|----------------|
 | Cost cap / sporting / technical rules | Regulation RAG + optional year follow-up |
-| Full Monaco 2021 results | CSV classification; optional Qualifying/Sprint follow-up |
-| Hamilton’s team in 2012 | CSV driver–team lookup |
+| Full Monaco 2021 results | Archive classification (CSV or Postgres); optional Qualifying/Sprint follow-up |
+| Hamilton’s team in 2012 | Archive driver–team lookup |
 | Lap 12 at Monza 2024 for a driver | OpenF1 lap packet |
 | Fastest lap in latest **FP2** for Hamilton | OpenF1 session + laps (direct API path) |
 | Live telemetry for `#1` | OpenF1 only when a session is in the live window |
@@ -133,12 +133,32 @@ python server.py                    # http://127.0.0.1:5001
 
 **CLI only:** `python app.py` from a **Terminal** tab (not the IDE Debug Console) so backspace/arrows work.
 
+### PostgreSQL (default in Docker)
+
+`docker compose up` starts **Postgres + the app**. On first boot, `scripts/start_web.py` applies `db/schema.sql` and loads Ergast CSVs into `f1.*` if the archive is empty. Chat sessions go to `chat.*`.
+
+`python server.py` without `DATABASE_URL` still uses CSVs and in-memory sessions (what the unit tests do).
+
+Local Postgres without the full stack:
+
+```bash
+docker compose up -d postgres
+# DATABASE_URL=postgresql://racecoe:racecoe@127.0.0.1:5432/racecoe
+python scripts/init_postgres.py
+python scripts/load_ergast_to_postgres.py
+# HISTORICAL_BACKEND=postgres
+# SESSION_STORE=postgres
+python server.py
+```
+
 ### Production-shaped run (Docker)
 
 ```bash
 cp .env.example .env                # GEMINI_API_KEY, HF_TOKEN
-docker compose up --build           # http://127.0.0.1:8000 — check /api/health
+docker compose up --build           # Postgres + app — http://127.0.0.1:8000
 ```
+
+First boot can take 1–2 minutes while CSVs load. Later starts skip the load.
 
 Deploy to **Render** with `render.yaml`; set secrets in the dashboard. Smoke test:
 
@@ -186,13 +206,14 @@ End-to-end flow for one user message:
 ```mermaid
 flowchart LR
   UI[React UI / CLI] --> API[FastAPI server.py]
+  API --> MEM[chat_store memory or Postgres]
   API --> PQ[process_query app.py]
   PQ --> R{Router + handlers}
-  R --> CSV[Historical CSV]
+  R --> ARCH[historical_db CSV or Postgres]
   R --> OF1[OpenF1 API]
   R --> RAG[FAISS + embeddings]
   R --> LLM[Gemini / Ollama]
-  CSV --> CTX[Context packet]
+  ARCH --> CTX[Context packet]
   OF1 --> CTX
   RAG --> CTX
   CTX --> LLM
@@ -202,9 +223,9 @@ flowchart LR
 1. **Ingress** — `POST /api/chat` with `session_id` + message; per-session lock keeps history consistent; different users run in parallel.
 2. **Pre-routing** — Specialized handlers (race results, driver teams, session fastest lap, top speed, lap deltas, clarifications) run before generic LLM routing.
 3. **Routing** — LLM classifies intent (regulation category, historical, quantitative, ambiguous).
-4. **Retrieval** — CSV SQL-like pandas lookups, OpenF1 HTTP, or hybrid regulation search (exact article + vector).
+4. **Retrieval** — Archive lookups (pandas CSV or PostgreSQL `f1.*`), OpenF1 HTTP, or hybrid regulation search (exact article + vector).
 5. **Generation** — LLM answers **only** from the context packet; citations appended from `utils/citations.py`.
-6. **Memory** — Last 5 turns stored per session; follow-ups can reuse answers or trigger re-fetch.
+6. **Memory** — Last 5 turns stored per session (in-process dict or `chat.turns`); follow-ups can reuse answers or trigger re-fetch.
 
 **Boot:** optional embedding warmup (`initialize_pipeline` / `F1_SKIP_WARMUP` on small hosts).
 
@@ -232,7 +253,7 @@ Planned and natural extensions:
 | **Teams & grids** | Full constructor line-ups per season (drivers, numbers, team principals) from CSV + OpenF1, not only single driver–team lookups |
 | **Standings & points** | Championship tables, sprint points, and race-by-race progression from existing CSV + API fields |
 | **UI** | Streaming answers, richer session picker (FP1/FP2/Quali/Race), standings pages wired to real data (nav placeholders today) |
-| **Backend** | Session store (Redis) for multi-instance deploy; rate limiting; optional external embedding API to drop in-process torch |
+| **Backend** | Redis for locks/rate-limits; optional external embedding API to drop in-process torch |
 | **RAG** | Close **B02** (empty chunks); stronger held-out eval (RAGAS/faithfulness) when the backlog allows |
 | **Data** | Post-2026 results via OpenF1-first path; more regulation seasons in `vector_store/` |
 
@@ -253,7 +274,7 @@ Planned and natural extensions:
 **Ops**
 - **Render Standard (2GB)** + `F1_SKIP_WARMUP=0` for faster first RAG answer; keep-alive cron on free tier.
 - Persist **HF model cache** in Docker volume to shorten cold starts.
-- **Horizontal scale** needs shared session storage — in-memory `_sessions` is fine for demos, not for high traffic.
+- **Horizontal scale** uses Postgres `chat.*` sessions when `SESSION_STORE=postgres`; in-memory `_sessions` remains the no-DB fallback.
 
 **Contributions welcome:** tests in `tests/`, issues in `ISSUES.md`, small focused PRs on router, `f1_api.py`, or UI.
 
@@ -311,6 +332,7 @@ Embeddings stay on **Hugging Face** (`BAAI/bge-base-en-v1.5`) in both environmen
 - Docker (recommended) — see `Dockerfile`
 - Cloud LLM: **Gemini** (recommended) or **Groq**
 - Host secrets: `HF_TOKEN`, `GEMINI_API_KEY` or `GROQ_API_KEY`, optional `CORS_ORIGINS`
+- **PostgreSQL** via `render.yaml` (`DATABASE_URL` from `racecoe-db`); Docker Compose always starts `postgres`
 - Outbound HTTPS for OpenF1, Hugging Face, currency FX, and the LLM API
 - Built FAISS indexes (`vector_store/*/index.faiss`) and historical CSVs (`data/historical_csvs/`) are committed so the Docker image includes them (`data/archive/` is excluded)
 
@@ -332,18 +354,18 @@ Embeddings stay on **Hugging Face** (`BAAI/bge-base-en-v1.5`) in both environmen
    # open http://127.0.0.1:8000 — check /api/health
    ```
 6. Deploy with Docker to **Render** (uses `render.yaml`) or Railway / HF Spaces  
-7. Set secret env vars on the host: `GEMINI_API_KEY`, `HF_TOKEN`, optional `CORS_ORIGINS`  
+7. Set secret env vars on the host: `GEMINI_API_KEY`, `HF_TOKEN`, optional `CORS_ORIGINS`. Blueprint wires `DATABASE_URL` from the Postgres instance.  
 8. Smoke test: `python scripts/smoke_deploy.py --http --base-url https://YOUR-URL`
 
 ```bash
-# Example without Docker
+# Example without Docker (CSV fallback unless DATABASE_URL is set)
 export LLM_PROVIDER=gemini
 export LLM_MODEL=gemini-3.8-flash
 export GEMINI_API_KEY=...
 export HF_TOKEN=...
 export HOST=0.0.0.0
 export PORT=8000
-uvicorn server:app --host 0.0.0.0 --port 8000
+python scripts/start_web.py
 ```
 
 ## Setup (local)
@@ -598,12 +620,22 @@ utils/
   driver_names.py       # F1DriversDataset name resolution
   driver_numbers.py     # Driver name → car number resolution
   f1_api.py             # OpenF1 API client + lap time formatting
-  historical_db.py      # CSV lookups: race results, driver teams, lap deltas
+  db.py                 # DATABASE_URL, schema apply, backend flags
+  historical_db.py      # Archive lookups (CSV or Postgres)
+  historical_pg.py      # SQL implementations of the same packets
+  chat_store.py         # Session history (memory or Postgres)
   venues.py             # Circuit/country resolution + multi-GP clarification
   currency.py           # Live FX rates + multi-currency display
   citations.py          # Source footer formatting for answers
   embeddings.py         # HuggingFace embeddings (singleton cache, HF_TOKEN)
   vector_store.py       # FAISS search wrapper (per-category index cache)
+db/
+  schema.sql            # f1 / chat / rag / app
+  schema_pgvector.sql   # optional embedding columns
+scripts/
+  start_web.py          # Docker/Render CMD: wait, schema, load-if-empty, uvicorn
+  init_postgres.py      # Apply schema to DATABASE_URL
+  load_ergast_to_postgres.py
 tests/                  # Regression tests (incl. test_concurrent_sessions.py, test_session_fastest_lap.py)
 data/
   *.pdf                 # FIA regulation documents
@@ -613,12 +645,27 @@ vector_store/           # Generated FAISS indexes (gitignored)
 ISSUES.md               # Bug backlog and fix history
 ```
 
+## PostgreSQL in Racecoe
+
+Docker and Render treat SQL as the archive and session store. The same lookup functions in `utils/historical_db.py` dispatch to `utils/historical_pg.py` when `HISTORICAL_BACKEND=postgres` (or `auto` with a loaded `f1.races` table). `server.py` uses `utils/chat_store.py` the same way.
+
+| Path | What you get |
+|------|----------------|
+| `docker compose up` / Render Blueprint | Always-on Postgres, `DATABASE_URL` injected, schema + CSV load on empty DB |
+| `python server.py` with no `DATABASE_URL` | CSV archive + in-memory sessions (tests stay offline) |
+| Unreachable DB at boot | `start_web.py` falls back to CSV so the API still starts |
+
+Benefits you can see in practice: indexed joins instead of full CSV scans, chat history that survives process restarts, and a clear module boundary (`csv` vs `postgres`) without changing the chat router.
+
+FAISS regulation/history RAG and live OpenF1 HTTP are **not** stored in Postgres.
+
 ## Data Notes 🗒️
 
 - **FIA PDFs**: Regulation sections are included in `data/`
 - **Historical CSVs**: From the [Kaggle F1 dataset](https://www.kaggle.com/datasets/rohanrao/formula-1-world-championship-1950-2020) (1950–2020)
 - **Archive PDFs**: Older regulation PDFs in `data/archive/` are gitignored due to size; add them locally if needed
-- **OpenF1**: Used for 2021+ live and lap data; pre-2026 race results and lap deltas come from CSV
+- **OpenF1**: Used for 2021+ live and lap data; pre-2026 race results and lap deltas come from the historical archive (Postgres in Docker/Render; CSVs when `DATABASE_URL` is unset)
+- **PostgreSQL**: Default for Compose and Render. Schemas: `f1` (Ergast archive), `chat` (sessions), `rag` / `app` (reserved). FAISS and live OpenF1 stay outside SQL.
 
 ## RAG performance & deployment
 
@@ -650,7 +697,7 @@ Query-type impact on first answer after ready:
 | Query type | First-query penalty (after ready) |
 |------------|-----------------------------------|
 | Regulations / historical RAG | Embedding model + FAISS index (worst on skip-warmup) |
-| CSV race results, driver teams | Usually fast — CSVs already in memory |
+| Archive race results, driver teams | Indexed SQL in Docker/Render; pandas CSVs without a DB |
 | OpenF1 / live telemetry | Network + Gemini; no embedding load |
 
 ### What stays loaded
@@ -699,7 +746,7 @@ python app.py
 |-------|----------------|
 | **Local LLM** | Use **Ollama** (`LLM_PROVIDER=ollama`, model `qwen2.5:7b-instruct-q8_0`). |
 | **Production LLM** | Use **Gemini 3.8 Flash** (`LLM_PROVIDER=gemini`, `LLM_MODEL=gemini-3.8-flash`). Free tier is rate-limited; **503 high-demand** responses are retried and fall back to other Flash models (see Evaluation). |
-| **Packaging** | Prefer **Docker** (`Dockerfile`): builds the React app, copies CSVs + `vector_store/`, runs `uvicorn server:app --host 0.0.0.0 --port $PORT`. On Render free (512MB), default `F1_SKIP_WARMUP=1` so boot does not OOM on embeddings. |
+| **Packaging** | Prefer **Docker** (`Dockerfile`): builds the React app, copies CSVs + `vector_store/`, runs `python scripts/start_web.py` (schema + archive load, then uvicorn). On Render free (512MB), default `F1_SKIP_WARMUP=1` so boot does not OOM on embeddings. |
 | **Long-running API server** | Keep one process alive. With warmup enabled, embedding weights load once at boot; with skip-warmup, they load on first RAG use. |
 | **Hugging Face cache** | Mount or bake `~/.cache/huggingface`, or set `HF_HOME`, so embedding weights persist across container restarts. |
 | **Serverless / scale-to-zero** | Every cold start reloads the embedding model unless you use provisioned concurrency or a managed embedding API. |

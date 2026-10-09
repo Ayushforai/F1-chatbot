@@ -1,13 +1,33 @@
-# Local production-shaped run for Racecoe.
+# Local production-shaped run for Racecoe (Postgres is the default archive).
 # Usage:
 #   cp .env.example .env   # set GEMINI_API_KEY + HF_TOKEN
 #   docker compose up --build
+# First boot loads Ergast CSVs into Postgres (can take 1–2 minutes).
 
 services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: racecoe
+      POSTGRES_PASSWORD: racecoe
+      POSTGRES_DB: racecoe
+    ports:
+      - "5432:5432"
+    volumes:
+      - racecoe_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U racecoe -d racecoe"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   racecoe:
     build: .
     ports:
       - "${PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
     environment:
       HOST: "0.0.0.0"
       PORT: "8000"
@@ -19,6 +39,9 @@ services:
       HF_TOKEN: ${HF_TOKEN:-}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       RAG_WARMUP_CATEGORIES: ${RAG_WARMUP_CATEGORIES:-}
+      DATABASE_URL: postgresql://racecoe:racecoe@postgres:5432/racecoe
+      HISTORICAL_BACKEND: postgres
+      SESSION_STORE: postgres
     healthcheck:
       test:
         [
@@ -29,6 +52,9 @@ services:
         ]
       interval: 30s
       timeout: 5s
-      retries: 5
-      start_period: 120s
+      retries: 8
+      start_period: 240s
     restart: unless-stopped
+
+volumes:
+  racecoe_pgdata:

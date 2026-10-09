@@ -23,7 +23,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     F1_SKIP_WARMUP=1 \
     OMP_NUM_THREADS=1 \
     MKL_NUM_THREADS=1 \
-    TOKENIZERS_PARALLELISM=false
+    TOKENIZERS_PARALLELISM=false \
+    HISTORICAL_BACKEND=postgres \
+    SESSION_STORE=postgres
 
 WORKDIR /app
 
@@ -39,6 +41,8 @@ RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu 
 COPY app.py server.py pdf_processor.py historical_processor.py \
      setup_historical_data.py setup_driver_numbers.py ./
 COPY utils ./utils
+COPY db ./db
+COPY scripts ./scripts
 COPY data ./data
 # Indexes + historical CSVs are committed for cloud builds.
 COPY vector_store ./vector_store
@@ -49,4 +53,4 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=180s --retries=5 \
   CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:'+__import__('os').environ.get('PORT','8000')+'/api/health')" || exit 1
 
-CMD ["sh", "-c", "uvicorn server:app --host ${HOST:-0.0.0.0} --port ${PORT:-8000}"]
+CMD ["python", "scripts/start_web.py"]

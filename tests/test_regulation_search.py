@@ -50,7 +50,7 @@ class RegulationSearchTests(unittest.TestCase):
         self.assertEqual(metadata[0]["lookup"], "exact")
 
     def test_broad_query_requests_more_chunks(self):
-        with patch("utils.vector_store.lookup_articles", return_value=[]), patch(
+        with patch("utils.regulation_parser.lookup_articles", return_value=[]), patch(
             "utils.vector_store.get_vector_store"
         ) as get_store, patch("utils.vector_store._load_articles_index", return_value=[]):
             get_store.return_value.similarity_search.return_value = [

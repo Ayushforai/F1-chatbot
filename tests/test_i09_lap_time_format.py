@@ -30,25 +30,45 @@ class TestI09LapTimeFormat(unittest.TestCase):
     def test_format_lap_time_handles_missing(self):
         self.assertEqual(format_lap_time(None), "N/A")
 
-    @patch("utils.f1_api.requests.get")
-    def test_fastest_lap_packet_includes_formatted_lap_time(self, mock_get):
-        mock_get.side_effect = [
-            _response([SESSION]),
-            _response([{"driver_number": 16, "lap_number": 42, "lap_duration": 92.891, "st_speed": 245}]),
-            _response([{"full_name": "Charles Leclerc"}]),
-        ]
-        result = get_fastest_lap_of_race(2024, "Italy", location="Monza")
+    def test_fastest_lap_packet_includes_formatted_lap_time(self):
+        def fake_get(url, *args, **kwargs):
+            if url.endswith("/sessions"):
+                return _response([SESSION])
+            if url.endswith("/laps"):
+                return _response(
+                    [{"driver_number": 16, "lap_number": 42, "lap_duration": 92.891, "st_speed": 245}]
+                )
+            if url.endswith("/drivers"):
+                return _response([{"full_name": "Charles Leclerc"}])
+            raise AssertionError(url)
+
+        with patch("utils.f1_api._http_get", side_effect=fake_get):
+            result = get_fastest_lap_of_race(2024, "Italy", location="Monza")
         self.assertEqual(result["lap_time"], "1:32.891")
         self.assertEqual(result["lap_time_seconds"], 92.891)
 
-    @patch("utils.f1_api.requests.get")
-    def test_historical_lap_packet_includes_formatted_lap_time(self, mock_get):
-        mock_get.side_effect = [
-            _response([SESSION]),
-            _response([{"driver_number": 44, "lap_number": 12, "lap_duration": 92.891, "st_speed": 238, "is_pit_out_lap": False}]),
-            _response([{"full_name": "Lewis Hamilton"}]),
-        ]
-        result = get_historical_lap(2024, "Italy", 44, 12, location="Monza")
+    def test_historical_lap_packet_includes_formatted_lap_time(self):
+        def fake_get(url, *args, **kwargs):
+            if url.endswith("/sessions"):
+                return _response([SESSION])
+            if url.endswith("/laps"):
+                return _response(
+                    [
+                        {
+                            "driver_number": 44,
+                            "lap_number": 12,
+                            "lap_duration": 92.891,
+                            "st_speed": 238,
+                            "is_pit_out_lap": False,
+                        }
+                    ]
+                )
+            if url.endswith("/drivers"):
+                return _response([{"full_name": "Lewis Hamilton"}])
+            raise AssertionError(url)
+
+        with patch("utils.f1_api._http_get", side_effect=fake_get):
+            result = get_historical_lap(2024, "Italy", 44, 12, location="Monza")
         self.assertEqual(result["lap_time"], "1:32.891")
         self.assertEqual(result["lap_time_seconds"], 92.891)
 

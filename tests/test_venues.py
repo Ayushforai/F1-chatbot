@@ -162,7 +162,7 @@ class TestOpenF1VenueAndFutureSession(unittest.TestCase):
                 return _response([{"full_name": "Max VERSTAPPEN"}])
             raise AssertionError(url)
 
-        with patch("utils.f1_api.requests.get", side_effect=fake_get):
+        with patch("utils.f1_api._http_get", side_effect=fake_get):
             result = get_fastest_lap_of_race(2024, "Italy", location="Monza", now=NOW)
 
         self.assertEqual(result["race"], "Monza 2024")
@@ -170,7 +170,7 @@ class TestOpenF1VenueAndFutureSession(unittest.TestCase):
 
     def test_italy_without_location_does_not_silently_pick_imola(self):
         with patch(
-            "utils.f1_api.requests.get",
+            "utils.f1_api._http_get",
             return_value=_response([IMOLA_RACE, MONZA_RACE]),
         ):
             result = fetch_race_session(2024, "Italy", now=NOW)
@@ -179,17 +179,17 @@ class TestOpenF1VenueAndFutureSession(unittest.TestCase):
         self.assertIn("Monza", result)
 
     def test_future_session_returns_not_held_message(self):
-        with patch("utils.f1_api.requests.get", return_value=_response([FUTURE_RACE])):
+        with patch("utils.f1_api._http_get", return_value=_response([FUTURE_RACE])):
             result = fetch_race_session(2026, "Singapore", now=NOW)
         self.assertEqual(result, SESSION_NOT_HELD_MESSAGE)
 
     def test_missing_session_in_current_year_is_not_held(self):
-        with patch("utils.f1_api.requests.get", return_value=_response({"detail": "No results found."}, status=404)):
+        with patch("utils.f1_api._http_get", return_value=_response({"detail": "No results found."}, status=404)):
             result = fetch_race_session(2026, "Singapore", now=NOW)
         self.assertEqual(result, SESSION_NOT_HELD_MESSAGE)
 
     def test_missing_session_in_past_year_is_not_found(self):
-        with patch("utils.f1_api.requests.get", return_value=_response({"detail": "No results found."}, status=404)):
+        with patch("utils.f1_api._http_get", return_value=_response({"detail": "No results found."}, status=404)):
             result = fetch_race_session(2019, "Singapore", now=NOW)
         self.assertIn("Could not locate a Race session", result)
         self.assertIn("Singapore", result)
