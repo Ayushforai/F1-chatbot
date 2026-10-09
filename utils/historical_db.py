@@ -420,21 +420,111 @@ def format_race_classification(packet: dict) -> str:
     return "\n".join(lines)
 
 
-def _resolve_driver(driver_ref: str) -> tuple[int, str] | None:
+def _row_to_driver_tuple(row) -> tuple[int, str]:
+    return int(row["driverId"]), f"{row['forename']} {row['surname']}"
+
+
+def _driver_ids_in_season(year: int) -> set[int]:
+    if races_df is None or results_df is None:
+        return set()
+    race_ids = races_df[races_df["year"] == year]["raceId"]
+    if race_ids.empty:
+        return set()
+    return set(results_df[results_df["raceId"].isin(race_ids)]["driverId"].unique())
+
+
+def _pick_driver_match(match: pd.DataFrame, year: int | None) -> pd.DataFrame:
+    if match.empty or year is None or len(match) == 1:
+        return match
+    in_season = _driver_ids_in_season(year)
+    if not in_season:
+        return match
+    filtered = match[match["driverId"].isin(in_season)]
+    return filtered if not filtered.empty else match
+
+
+def _resolve_driver_by_full_name(full_name: str) -> tuple[int, str] | None:
+    if drivers_df is None or not full_name:
+        return None
+    parts = full_name.split()
+    if len(parts) < 2:
+        return None
+    forename, surname = parts[0], parts[-1]
+    match = drivers_df[
+        (drivers_df["forename"].str.lower() == forename.lower())
+        & (drivers_df["surname"].str.lower() == surname.lower())
+    ]
+    if match.empty:
+        return None
+    return _row_to_driver_tuple(match.iloc[0])
+
+
+def _filter_ambiguous_surname_rows(
+    match: pd.DataFrame,
+    driver_ref: str,
+    query: str = "",
+    year: int | None = None,
+) -> pd.DataFrame:
+    if len(match) <= 1:
+        return match
+    from utils.driver_names import resolve_driver_identity
+
+    identity = resolve_driver_identity(
+        ref=driver_ref,
+        query=query or driver_ref,
+        year=year,
+    )
+    if not identity:
+        return match
+    parts = identity["full_name"].split()
+    if len(parts) < 2:
+        return match
+    forename, surname = parts[0], parts[-1]
+    chosen = match[
+        (match["forename"].str.lower() == forename.lower())
+        & (match["surname"].str.lower() == surname.lower())
+    ]
+    return chosen if not chosen.empty else match
+
+
+def _resolve_driver(
+    driver_ref: str,
+    year: int | None = None,
+    *,
+    query: str = "",
+) -> tuple[int, str] | None:
     if drivers_df is None:
         return None
     if not driver_ref or not str(driver_ref).strip():
         return None
     ref = str(driver_ref).strip()
+    context_query = query or ref
 
-    def _row_to_tuple(row) -> tuple[int, str]:
-        return int(row["driverId"]), f"{row['forename']} {row['surname']}"
+    try:
+        from utils.driver_names import resolve_driver_identity
+
+        identity = resolve_driver_identity(ref=ref, query=context_query, year=year)
+        if identity:
+            resolved = _resolve_driver_by_full_name(identity["full_name"])
+            if resolved:
+                return resolved
+    except Exception:
+        pass
 
     if "driverRef" in drivers_df.columns:
-        slug = ref.lower().replace(" ", "_")
+        from utils.driver_ambiguity import preferred_ergast_driver_ref
+
+        slug = preferred_ergast_driver_ref(
+            ref,
+            query=context_query,
+            year=year,
+        ) or ref.lower().replace(" ", "_")
         match = drivers_df[drivers_df["driverRef"].str.lower() == slug]
         if not match.empty:
-            return _row_to_tuple(match.iloc[0])
+            match = _filter_ambiguous_surname_rows(
+                _pick_driver_match(match, year), ref, context_query, year
+            )
+            return _row_to_driver_tuple(match.iloc[0])
 
     parts = ref.split()
     if len(parts) >= 2:
@@ -444,19 +534,26 @@ def _resolve_driver(driver_ref: str) -> tuple[int, str] | None:
             & drivers_df["surname"].str.contains(surname, case=False, na=False)
         ]
         if not match.empty:
-            return _row_to_tuple(match.iloc[0])
+            match = _filter_ambiguous_surname_rows(
+                _pick_driver_match(match, year), ref, context_query, year
+            )
+            return _row_to_driver_tuple(match.iloc[0])
 
         full_names = drivers_df["forename"] + " " + drivers_df["surname"]
         match = drivers_df[full_names.str.contains(ref, case=False, na=False)]
         if not match.empty:
-            return _row_to_tuple(match.iloc[0])
+            match = _filter_ambiguous_surname_rows(
+                _pick_driver_match(match, year), ref, context_query, year
+            )
+            return _row_to_driver_tuple(match.iloc[0])
 
     match = drivers_df[drivers_df["surname"].str.contains(ref, case=False, na=False)]
     if match.empty:
         match = drivers_df[drivers_df["forename"].str.contains(ref, case=False, na=False)]
     if match.empty:
         return None
-    return _row_to_tuple(match.iloc[0])
+    match = _filter_ambiguous_surname_rows(_pick_driver_match(match, year), ref, context_query, year)
+    return _row_to_driver_tuple(match.iloc[0])
 
 
 def _resolve_race(year: int, country: str, location: str | None = None) -> tuple[int, str] | str:
@@ -504,8 +601,8 @@ def get_lap_time_delta(
             return race
         race_id, race_name = race
 
-        resolved_a = _resolve_driver(driver_a)
-        resolved_b = _resolve_driver(driver_b)
+        resolved_a = _resolve_driver(driver_a, year=year)
+        resolved_b = _resolve_driver(driver_b, year=year)
         if resolved_a is None:
             return f"Could not find driver '{driver_a}' in the historical database."
         if resolved_b is None:
@@ -603,7 +700,7 @@ def get_max_fastest_lap_speed(
         merged = merged[merged["fastestLapSpeed"].notna()]
 
         if driver_ref:
-            resolved = _resolve_driver(driver_ref)
+            resolved = _resolve_driver(driver_ref, year=year)
             if resolved is None:
                 return f"Could not find driver '{driver_ref}' in the historical database."
             merged = merged[merged["driverId"] == resolved[0]]
@@ -787,7 +884,7 @@ def get_driver_teams(year: int, driver_ref: str) -> dict | str:
         return missing
 
     try:
-        resolved = _resolve_driver(driver_ref)
+        resolved = _resolve_driver(driver_ref, year=year)
         if resolved is None:
             return f"Could not find driver '{driver_ref}' in the historical database."
 
@@ -855,7 +952,7 @@ def format_driver_teams(packet: dict) -> str:
     return "\n".join(lines)
 
 
-def get_driver_standing(year: int, driver_ref: str) -> dict | str:
+def get_driver_standing(year: int, driver_ref: str, *, query: str = "") -> dict | str:
     """Return a driver's end-of-season championship position and points."""
     missing = _require_csv()
     if missing:
@@ -864,7 +961,7 @@ def get_driver_standing(year: int, driver_ref: str) -> dict | str:
         return "Driver standings data is not available in the historical CSV database."
 
     try:
-        resolved = _resolve_driver(driver_ref)
+        resolved = _resolve_driver(driver_ref, year=year, query=query or driver_ref)
         if resolved is None:
             return f"Could not find driver '{driver_ref}' in the historical database."
 
@@ -934,7 +1031,7 @@ def get_historical_driver_info(year: int, driver_ref: str, country: str = None, 
         if not driver_ref:
             return race_data  # no specific driver — return full results
 
-        resolved = _resolve_driver(driver_ref)
+        resolved = _resolve_driver(driver_ref, year=year)
         if resolved is None:
             return race_data
 

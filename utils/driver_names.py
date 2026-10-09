@@ -13,7 +13,6 @@ DATA_PATH = Path(__file__).resolve().parent.parent / "data" / "historical_csvs" 
 
 _SUFFIXES = {"jr", "jr.", "sr", "sr.", "ii", "iii"}
 
-
 def _normalize(text: str | None) -> str:
     if not text:
         return ""
@@ -94,6 +93,14 @@ def catalog_available() -> bool:
     return bool(rows)
 
 
+def _catalog_entry(full_name: str) -> dict | None:
+    rows, _ = _load_catalog()
+    for entry in rows:
+        if entry["full_name"] == full_name:
+            return entry
+    return None
+
+
 def _score_match(entry: dict, *, year: int | None, alias: str, source: str) -> int:
     score = len(alias)
     if source == "full":
@@ -128,6 +135,17 @@ def _best_match(candidates: list[tuple[int, str, str]], *, year: int | None) -> 
         active = [entry for entry in top if entry["active"]]
         if len(active) == 1:
             return active[0]
+        from utils.driver_ambiguity import _grid_catalog_entry
+
+        by_surname: dict[str, list[dict]] = {}
+        for entry in top:
+            by_surname.setdefault(entry.get("surname") or "", []).append(entry)
+        for surname, entries in by_surname.items():
+            if len(entries) < 2:
+                continue
+            preferred = _grid_catalog_entry(surname, year)
+            if preferred and preferred in entries:
+                return preferred
     return top[0]
 
 
@@ -217,11 +235,15 @@ def resolve_driver_identity(
     year: int | None = None,
 ) -> dict | None:
     """Return canonical driver identity from ref and/or query text."""
-    for candidate in (ref,):
-        if candidate:
-            match = match_driver_ref(candidate, year=year)
-            if match:
-                return match
-    if query:
-        return match_driver_in_text(query, year=year)
+    from utils.driver_ambiguity import apply_surname_ambiguity_policy, mentions_driver_forename
+
+    text_match = match_driver_in_text(query, year=year) if query else None
+    ref_match = match_driver_ref(ref, year=year) if ref else None
+
+    if text_match and mentions_driver_forename(text_match["full_name"], ref=ref, query=query):
+        return apply_surname_ambiguity_policy(text_match, ref=ref, query=query, year=year)
+    if ref_match:
+        return apply_surname_ambiguity_policy(ref_match, ref=ref, query=query, year=year)
+    if text_match:
+        return apply_surname_ambiguity_policy(text_match, ref=ref, query=query, year=year)
     return None

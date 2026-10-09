@@ -37,6 +37,7 @@ Racecoe is a hybrid Formula 1 assistant (formerly the F1 Pit Wall chatbot). It r
 - **Venue clarification** — multi-GP countries (e.g. Italy, USA) prompt for the specific circuit (Monza vs Imola, Austin vs Miami vs Las Vegas)
 - **Driver clarification** — lap and telemetry queries require a named driver; no silent default to Hamilton
 - **Driver number lookup** — names, surnames, and `#NN` tokens map to car numbers via `data/driver_numbers.json` (OpenF1 grid). `F1DriversDataset.csv` helps recognize 868 canonical driver names in query text before number lookup.
+- **Surname disambiguation** — when several drivers share a surname in `F1DriversDataset.csv`, Racecoe defaults to whoever is on the OpenF1 grid for that season (`driver_numbers.json`). Legacy drivers are used only if their forename appears in the query (e.g. `jos verstappen`). Optional overrides: `data/driver_ambiguity.json` (see `utils/driver_ambiguity.py`).
 
 ### Live & quantitative data 📊
 - **OpenF1 integration** — fastest lap, specific-lap lookups, and live telemetry when a session is actually live

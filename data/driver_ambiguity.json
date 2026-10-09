@@ -1,0 +1,5 @@
+{
+  "schema_version": 1,
+  "description": "Optional surname disambiguation on top of auto rules. Auto rules: for each surname shared by multiple drivers in F1DriversDataset.csv, default to the driver on the OpenF1 grid (driver_numbers.json) for the query season when that season exists in driver_numbers.json; pick a legacy driver only when their forename appears in the query (e.g. jos verstappen). Add a group here when auto-detection is not enough (same surname but not on grid, or non-obvious tokens).",
+  "groups": []
+}

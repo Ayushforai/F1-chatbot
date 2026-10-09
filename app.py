@@ -12,6 +12,7 @@ from datetime import datetime
 
 from utils.llm import generate as llm_generate, get_model_name
 from utils.driver_numbers import enrich_telemetry_params
+from utils.driver_names import resolve_driver_identity
 from utils.race_schedule import RACE_NOT_HELD_RESULTS_MESSAGE, race_results_unavailable_reason
 from utils.router import (
     ambiguous_query_response,
@@ -1708,22 +1709,56 @@ def _is_driver_standing_query(user_query: str) -> bool:
     return any(pattern in q for pattern in patterns)
 
 
+_DRIVER_NAME_IN_QUERY = (
+    r"[A-Za-z\u00C0-\u024F\-']+(?:\s+[A-Za-z\u00C0-\u024F\-']+)*"
+)
+_STANDING_POINTS_VERB = (
+    r"(?:\s+(?:win|wins|get|gets|got|receive|received|score|scored|earn|earned))?"
+)
+
+
+def _year_from_query_or_history(user_query: str, history: list[dict] | None) -> int | None:
+    year = _explicit_year(user_query)
+    if year is not None:
+        return year
+    for turn in reversed(history or []):
+        if turn.get("year") is not None:
+            return turn["year"]
+    return None
+
+
+def _canonical_driver_surname(ref: str, *, year: int | None, query: str = "") -> str | None:
+    if not ref or not str(ref).strip():
+        return None
+    ref = str(ref).strip()
+    identity = resolve_driver_identity(ref=ref, query=query or ref, year=year)
+    if identity:
+        return identity["surname"]
+    return ref
+
+
 def _driver_ref_from_standing_query(user_query: str, history: list[dict] | None = None) -> str | None:
-    params = extract_telemetry_params(user_query, history=history or [])
-    if params.get("driver_name"):
-        return params["driver_name"]
+    history = history or []
+    year = _year_from_query_or_history(user_query, history)
 
     patterns = [
-        r"where did\s+([A-Za-z\u00C0-\u024F\-']+(?:\s+[A-Za-z\u00C0-\u024F\-']+)?)\s+finish",
-        r"how many points did\s+([A-Za-z\u00C0-\u024F\-']+(?:\s+[A-Za-z\u00C0-\u024F\-']+)?)",
-        r"how many wins did\s+([A-Za-z\u00C0-\u024F\-']+(?:\s+[A-Za-z\u00C0-\u024F\-']+)?)",
-        r"([A-Za-z\u00C0-\u024F\-']+(?:\s+[A-Za-z\u00C0-\u024F\-']+)?)'s\s+(?:driver\s+)?standings",
-        r"([A-Za-z\u00C0-\u024F\-']+(?:\s+[A-Za-z\u00C0-\u024F\-']+)?)\s+(?:driver\s+)?standings",
+        rf"where did\s+({_DRIVER_NAME_IN_QUERY})\s+finish",
+        rf"how many points did\s+({_DRIVER_NAME_IN_QUERY}){_STANDING_POINTS_VERB}\b",
+        rf"how many wins did\s+({_DRIVER_NAME_IN_QUERY}){_STANDING_POINTS_VERB}\b",
+        rf"({_DRIVER_NAME_IN_QUERY})'s\s+(?:driver\s+)?standings",
+        rf"({_DRIVER_NAME_IN_QUERY})\s+(?:driver\s+)?standings",
     ]
     for pattern in patterns:
         match = re.search(pattern, user_query, re.I)
         if match:
-            return match.group(1).strip()
+            surname = _canonical_driver_surname(match.group(1), year=year, query=user_query)
+            if surname:
+                return surname
+
+    identity = resolve_driver_identity(query=user_query, year=year)
+    if identity:
+        return identity["surname"]
+
     return _driver_ref_from_team_query(user_query, history=history)
 
 
@@ -1742,7 +1777,7 @@ def _lookup_driver_standing(
     if not driver_ref:
         return MISSING_DRIVER_MESSAGE
     print(f" [CSV] Looking up {year} championship standing for {driver_ref}...")
-    result = get_driver_standing(year, driver_ref)
+    result = get_driver_standing(year, driver_ref, query=user_query)
     if isinstance(result, str):
         return result
     return format_driver_standing(result)
@@ -1769,20 +1804,24 @@ def _is_driver_team_query(user_query: str) -> bool:
 
 
 def _driver_ref_from_team_query(user_query: str, history: list[dict] | None = None) -> str | None:
-    params = extract_telemetry_params(user_query, history=history or [])
-    if params.get("driver_name"):
-        return params["driver_name"]
+    year = _year_from_query_or_history(user_query, history or [])
 
     patterns = [
-        r"which team did\s+([A-Za-z\u00C0-\u024F\-']+(?:\s+[A-Za-z\u00C0-\u024F\-']+)?)\s+drive",
-        r"what team did\s+([A-Za-z\u00C0-\u024F\-']+(?:\s+[A-Za-z\u00C0-\u024F\-']+)?)\s+drive",
-        r"what team was\s+([A-Za-z\u00C0-\u024F\-']+(?:\s+[A-Za-z\u00C0-\u024F\-']+)?)",
-        r"([A-Za-z\u00C0-\u024F\-']+(?:\s+[A-Za-z\u00C0-\u024F\-']+)?)'s team",
+        rf"which team did\s+({_DRIVER_NAME_IN_QUERY})\s+drive",
+        rf"what team did\s+({_DRIVER_NAME_IN_QUERY})\s+drive",
+        rf"what team was\s+({_DRIVER_NAME_IN_QUERY})",
+        rf"({_DRIVER_NAME_IN_QUERY})'s team",
     ]
     for pattern in patterns:
         match = re.search(pattern, user_query, re.I)
         if match:
-            return match.group(1).strip()
+            surname = _canonical_driver_surname(match.group(1), year=year, query=user_query)
+            if surname:
+                return surname
+
+    identity = resolve_driver_identity(query=user_query, year=year)
+    if identity:
+        return identity["surname"]
     return None
 
 

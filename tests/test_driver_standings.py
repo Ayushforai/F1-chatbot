@@ -2,7 +2,7 @@ import unittest
 from unittest.mock import patch
 
 import app
-from utils.historical_db import format_driver_standing, get_driver_standing
+from utils.historical_db import _resolve_driver, format_driver_standing, get_driver_standing
 
 
 class DriverStandingLookupTests(unittest.TestCase):
@@ -35,15 +35,43 @@ class DriverStandingLookupTests(unittest.TestCase):
         self.assertFalse(app._is_driver_standing_query("Results of Monaco GP 2012"))
 
     def test_handle_driver_standing_query(self):
-        with patch("app.extract_telemetry_params", return_value={"driver_name": "Hamilton"}):
-            history: list[dict] = []
-            handled = app._handle_driver_standing_query(
-                history,
-                "Where did Hamilton finish in the 2012 driver standings?",
-            )
+        history: list[dict] = []
+        handled = app._handle_driver_standing_query(
+            history,
+            "Where did Hamilton finish in the 2012 driver standings?",
+        )
         self.assertTrue(handled)
         self.assertIn("4th", history[-1]["answer"])
         self.assertIn("190", history[-1]["answer"])
+
+    def test_max_points_2023_standing_query(self):
+        history: list[dict] = []
+        handled = app._handle_driver_standing_query(
+            history,
+            "how many points did max win in the year 2023?",
+        )
+        self.assertTrue(handled)
+        self.assertIn("Verstappen", history[-1]["answer"])
+        self.assertNotIn("Jos Verstappen", history[-1]["answer"])
+        self.assertIn("575", history[-1]["answer"])
+
+    def test_driver_ref_from_standing_skips_llm(self):
+        with patch("app.extract_telemetry_params") as extract:
+            ref = app._driver_ref_from_standing_query(
+                "how many points did max verstappen received in the year 2023?",
+            )
+            extract.assert_not_called()
+        self.assertEqual(ref, "Verstappen")
+
+    def test_verstappen_slug_resolves_to_max_without_jos(self):
+        resolved = _resolve_driver("Verstappen", year=2023, query="how many points did max win in 2023?")
+        self.assertIsNotNone(resolved)
+        self.assertEqual(resolved[1], "Max Verstappen")
+
+    def test_jos_verstappen_when_explicit(self):
+        result = get_driver_standing(1994, "Verstappen", query="jos verstappen championship 1994")
+        self.assertIsInstance(result, dict)
+        self.assertEqual(result["Driver"], "Jos Verstappen")
 
     def test_standing_follow_up_after_driver_team(self):
         history = [

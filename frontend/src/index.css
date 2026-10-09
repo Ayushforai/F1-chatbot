@@ -1,3 +1,67 @@
+@font-face {
+  font-family: "Century Gothic";
+  src: url("./assets/fonts/GOTHIC.TTF") format("truetype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Century Gothic";
+  src: url("./assets/fonts/GOTHICI.TTF") format("truetype");
+  font-weight: 400;
+  font-style: italic;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Century Gothic";
+  src: url("./assets/fonts/GOTHICB.TTF") format("truetype");
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Century Gothic";
+  src: url("./assets/fonts/GOTHICB.TTF") format("truetype");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Century Gothic";
+  src: url("./assets/fonts/GOTHICB.TTF") format("truetype");
+  font-weight: 800;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Century Gothic";
+  src: url("./assets/fonts/GOTHICBI.TTF") format("truetype");
+  font-weight: 600;
+  font-style: italic;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Century Gothic";
+  src: url("./assets/fonts/GOTHICBI.TTF") format("truetype");
+  font-weight: 700;
+  font-style: italic;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Century Gothic";
+  src: url("./assets/fonts/GOTHICBI.TTF") format("truetype");
+  font-weight: 800;
+  font-style: italic;
+  font-display: swap;
+}
+
 :root {
   --f1-red: #e10600;
   --f1-red-dark: #b00500;
@@ -12,10 +76,10 @@
   --race-height: 40px;
   --composer-min-height: 52px;
   --safe-bottom: env(safe-area-inset-bottom, 0px);
-  --font-ui: "Titillium Web", "Segoe UI", sans-serif;
-  --font-chat: Georgia, "Times New Roman", serif;
-  --font-display: "Oswald", "Titillium Web", sans-serif;
-  --font-header: "Merriweather", Georgia, "Times New Roman", serif;
+  --font-ui: "Century Gothic", "Segoe UI", sans-serif;
+  --font-chat: "Century Gothic", "Segoe UI", sans-serif;
+  --font-display: "Century Gothic", "Segoe UI", sans-serif;
+  --font-header: "Century Gothic", "Segoe UI", sans-serif;
   --under-shadow:
     12px 16px 18px -5px rgba(225, 6, 0, 0.62),
     22px 30px 36px -8px rgba(255, 70, 50, 0.24);
@@ -52,6 +116,25 @@ textarea {
 
 button {
   cursor: pointer;
+}
+
+strong,
+b {
+  font-weight: 700;
+}
+
+em,
+i {
+  font-style: italic;
+}
+
+strong em,
+em strong,
+strong i,
+b i,
+b em {
+  font-weight: 700;
+  font-style: italic;
 }
 
 img {
